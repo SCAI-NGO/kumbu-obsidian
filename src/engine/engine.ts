@@ -527,10 +527,9 @@ export class SyncEngine {
       }
 
       case "trashLocal": {
-        // Asked again right before: a keystroke since the read makes it an edit, not a file to trash.
-        const now = await this.o.local.read(path);
-        if (now === null || (await versionOf(now)) !== local) return { remote };
-        await this.o.local.trashByPreference(path);
+        // Checked by the adapter right before it trashes: a keystroke since the read makes it an edit to upload
+        // (remote gone, local changed: reupload), not a file to trash.
+        if (local === null || !(await this.o.local.trashIf(path, local))) return { remote };
         delete this.state.bases[key];
         await this.save();
         return undefined;

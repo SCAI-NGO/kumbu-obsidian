@@ -87,9 +87,11 @@ export class NodeFiles implements LocalFiles {
     return Promise.resolve();
   }
 
-  trashByPreference(path: string): Promise<void> {
+  trashIf(path: string, expected: Version): Promise<boolean> {
+    const now = this.textOf(path);
+    if (now === null || versionOfSync(now) !== expected) return Promise.resolve(false);
     this.toTrash(path);
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
 
   rename(from: string, to: string): Promise<void> {

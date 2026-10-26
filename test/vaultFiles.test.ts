@@ -11,11 +11,20 @@ function fakeApp(disk: Record<string, string>) {
   const views: MarkdownView[] = [];
   const processed: string[] = [];
   let whileProcessing: (() => void) | null = null;
+  let whileReading: (() => void) | null = null;
+  const trashed: string[] = [];
   const app = {
     vault: {
       getFileByPath: (p: string) => (files.has(p) ? new TFile(p) : null),
       getAbstractFileByPath: (p: string) => (files.has(p) ? new TFile(p) : null),
-      read: (f: TFile) => Promise.resolve(files.get(f.path)!),
+      // Asynchronous like Obsidian's: an editor can change while the disk is read.
+      read: async (f: TFile) => {
+        const data = files.get(f.path)!;
+        await Promise.resolve();
+        whileReading?.();
+        whileReading = null;
+        return data;
+      },
       // Asynchronous like Obsidian's: it reads the file first, then runs the callback and writes in one step.
       process: async (f: TFile, fn: (data: string) => string) => {
         processed.push(f.path);
@@ -38,7 +47,9 @@ function fakeApp(disk: Record<string, string>) {
       getFiles: () => [...files.keys()].map((p) => new TFile(p)),
     },
     workspace: { getLeavesOfType: (type: string) => (type === "markdown" ? views.map((view) => ({ view })) : []) },
-    fileManager: {},
+    fileManager: {
+      trashFile: (f: TFile) => { trashed.push(f.path); files.delete(f.path); return Promise.resolve(); },
+    },
   };
   const open = (path: string, buffer: string) => {
     const view = new MarkdownView(new TFile(path), buffer, (text) => files.set(path, text));
@@ -46,7 +57,8 @@ function fakeApp(disk: Record<string, string>) {
     return view;
   };
   const duringProcess = (fn: () => void) => { whileProcessing = fn; };
-  return { app: app as unknown as App, files, open, processed, duringProcess };
+  const duringRead = (fn: () => void) => { whileReading = fn; };
+  return { app: app as unknown as App, files, open, processed, duringProcess, duringRead, trashed };
 }
 
 test("read gives the text in an open editor, saved or not", async () => {
@@ -117,4 +129,32 @@ test("a create that meets a file made meanwhile reports false", async () => {
   };
   expect(await files.writeIf("n.md", null, "mine")).toBe(false);
   expect(f.files.get("n.md")).toBe("someone else");
+});
+
+test("trashIf trashes a note whose disk and editor text are still the expected version", async () => {
+  const f = fakeApp({ "a.md": "base" });
+  f.open("a.md", "base");
+  expect(await new VaultFiles(f.app).trashIf("a.md", versionOfSync("base"))).toBe(true);
+  expect(f.trashed).toEqual(["a.md"]);
+});
+
+test("trashIf keeps a note with unsaved typing in an open editor", async () => {
+  const f = fakeApp({ "a.md": "base" });
+  f.open("a.md", "base plus unsaved typing");
+  expect(await new VaultFiles(f.app).trashIf("a.md", versionOfSync("base"))).toBe(false);
+  expect(f.trashed).toEqual([]);
+});
+
+test("trashIf keeps a note typed in while its file is read", async () => {
+  const f = fakeApp({ "a.md": "base" });
+  const view = f.open("a.md", "base");
+  f.duringRead(() => { view.buffer += " typed"; });
+  expect(await new VaultFiles(f.app).trashIf("a.md", versionOfSync("base"))).toBe(false);
+  expect(f.trashed).toEqual([]);
+});
+
+test("trashIf keeps a note changed on disk", async () => {
+  const f = fakeApp({ "a.md": "changed" });
+  expect(await new VaultFiles(f.app).trashIf("a.md", versionOfSync("base"))).toBe(false);
+  expect(f.trashed).toEqual([]);
 });

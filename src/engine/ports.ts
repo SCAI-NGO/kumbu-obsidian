@@ -43,7 +43,11 @@ export interface LocalFiles {
    */
   writeIf(path: string, expected: Version | null, content: string): Promise<boolean>;
   trashToLocal(path: string): Promise<void>; // Obsidian's .trash, always (first-sync "Keep Kumbu²")
-  trashByPreference(path: string): Promise<void>; // the user's trash setting (remote deletions)
+  /**
+   * Trashes by the user's trash setting (remote deletions), only if the text the user sees (as `read` gives it)
+   * still has version `expected`, checked right before trashing. Returns false, and keeps the file, if it changed.
+   */
+  trashIf(path: string, expected: Version): Promise<boolean>;
   rename(from: string, to: string): Promise<void>;
 }
 

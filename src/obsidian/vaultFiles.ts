@@ -69,9 +69,16 @@ export class VaultFiles implements LocalFiles {
     if (file) await this.app.vault.trash(file, false);
   }
 
-  async trashByPreference(path: string): Promise<void> {
+  async trashIf(path: string, expected: Version): Promise<boolean> {
     const file = this.app.vault.getFileByPath(path);
-    if (file) await this.app.fileManager.trashFile(file);
+    if (!file) return false;
+    // The disk first; then the editors are checked and the trash started in one synchronous step, so a keystroke
+    // (an event, never a microtask) can't come between the last check and the trash. Typing reaches the disk only
+    // through the editor, which is what is checked last.
+    if (versionOfSync(await this.app.vault.read(file)) !== expected) return false;
+    if (this.editorsOf(file).some((view) => versionOfSync(view.editor.getValue()) !== expected)) return false;
+    await this.app.fileManager.trashFile(file);
+    return true;
   }
 
   async rename(from: string, to: string): Promise<void> {

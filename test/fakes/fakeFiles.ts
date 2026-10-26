@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // In-memory LocalFiles. `caseInsensitive` makes lookups ignore case, as on macOS, Windows and Android.
 import type { LocalFiles, Version } from "../../src/engine/ports";
-import { versionOf } from "../../src/engine/version";
+import { versionOf, versionOfSync } from "../../src/engine/version";
 
 export class FakeFiles implements LocalFiles {
   readonly files = new Map<string, string>();
@@ -12,6 +12,8 @@ export class FakeFiles implements LocalFiles {
   caseInsensitive = false;
   /** Runs inside writeIf after the check and before the write, to model a race the real adapter can't have. */
   beforeWrite: ((path: string) => void) | null = null;
+  /** Runs when the engine trashes a file, before any check there: a keystroke between the engine's read and the trash. */
+  beforeTrash: ((path: string) => void) | null = null;
   writes = 0;
 
   constructor(initial: Record<string, string> = {}) {
@@ -71,9 +73,13 @@ export class FakeFiles implements LocalFiles {
     return Promise.resolve();
   }
 
-  trashByPreference(path: string): Promise<void> {
+  trashIf(path: string, expected: Version): Promise<boolean> {
+    this.beforeTrash?.(path);
+    const p = this.existing(path);
+    if (p === undefined || versionOfSync(this.editors.get(p) ?? this.files.get(p)!) !== expected) return Promise.resolve(false);
+    this.editors.delete(p);
     this.remove(path, this.systemTrash);
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
 
   rename(from: string, to: string): Promise<void> {

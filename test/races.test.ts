@@ -34,6 +34,23 @@ async function quiet(h: Harness): Promise<void> {
   await settle(h);
 }
 
+test("a keystroke between the engine's last read and trashing a note deleted in Kumbu² is uploaded, not trashed", async () => {
+  const h = await harness({ synced: { "a.md": "a0" } });
+  await h.server.agentWrite("a.md", null);
+  let typed = false;
+  h.files.beforeTrash = (p) => {
+    if (typed) return;
+    typed = true;
+    h.files.userTypes(p, "a0 typed just now");
+  };
+  await h.engine.check(false);
+  await settle(h);
+  expect(typed).toBe(true);
+  expect(h.files.systemTrash).toEqual([]);
+  expect(h.files.editors.get("a.md")).toBe("a0 typed just now");
+  expect(h.server.notes.get("a.md")?.content).toBe("a0 typed just now");
+});
+
 test("an upload in flight while a hint arrives", async () => {
   const h = await harness({ synced: { "a.md": "one", "b.md": "b" } });
   const release = h.server.hold("put");
