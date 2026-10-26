@@ -316,15 +316,15 @@ export function redeemPairing(http: HttpFn, server: string, code: string, device
 export function normalisePairingCode(input: string): string;   // uppercase, drop spaces and dashes, I/L → 1, O → 0
 ```
 
-Shapes in `types.ts` (from spec §5 and `NoteApi.cs`; adjust to the server plan before starting):
-- `GET /api/vaults/{vault}/versions[?since=]` with optional `If-None-Match: "<state>"` → `200 { cursor, state?, damaged, notes: [{ path, version?, deleted? }] }` or `304`. `full` is true when `since` was not sent. Paths come as `/Work/…` and are mapped with `fromApiPath`.
+Shapes in `types.ts`, reconciled on 2026-10-26 with the **API contract** of the server plan (`kumbukumbu/docs/superpowers/plans/2026-10-26-obsidian-sync-server.md`), which wins if the two ever differ; check against `/api/openapi.json` before starting:
+- `GET /api/vaults/{vault}/versions[?since=]` with optional `If-None-Match: "<state>"` → `200 { full, cursor, state, damaged, notes: [{ path, version }], deleted: [path] }` (ETag `"<state>"`) or `304`. `If-None-Match` is sent only without `since` (the server answers `304` only then). `deleted` is present only when `full` is false. `cursor` is opaque. A `since` answer may still come back `full: true` (server restarted, vault re-keyed, cursor too old): then treat it as a full list. Paths come as `/Work/…` and are mapped with `fromApiPath`.
 - `GET /api/notes/{vault}/{path}` → `NoteView { path, content, version, lastWriter, lastWriteAt, current }`; `404` → `null`.
 - `PUT /api/notes/{vault}/{path}` body `{ content, version? }` → `201`/`200 NoteView`; `409 ConflictView { error, current: { content, version } }`; `400`/`413 { error }`.
 - `DELETE /api/notes/{vault}/{path}?version=` → `204`; `409` with `ConflictView` (stale) or `404` (already gone: `{ ok: false, conflict: null }`).
 - `POST /api/move` body `{ from, to, keepLinks: true }` (API paths) → `200 MovedView { message, path, version }`; `409` → `{ ok: false }`.
-- `POST /api/ws-ticket` → `{ ticket }`. `GET /api/vaults` → `VaultView[] { name, notes, embeddings, canWrite }`.
+- `POST /api/ws-ticket` → `{ ticket, expiresAt }`. `GET /api/ws?ticket=` closes with `4401` when the key is revoked or expired → `AuthError`. `GET /api/vaults` → `VaultView[] { name, notes, embeddings, pending, canWrite }`.
 - `POST /api/pairing/redeem` body `{ code, device }` → `{ key, vault, keyName }`; `400`/`404` → `RejectedError("This code is not valid (any more).")` with the server's sentence when it has one; `429` → `RejectedError` with the server's sentence.
-- Every authorised request sends `Authorization: Bearer <key>` and `Content-Type: application/json` where there is a body. Status mapping for all: `401` → `AuthError`; `400`/`413` → `RejectedError(error)`; `5xx` and a thrown `HttpFn` → `OfflineError`.
+- Every authorised request sends `Authorization: Bearer <key>` and `Content-Type: application/json` where there is a body. Status mapping for all: `401` → `AuthError`; `400`/`413` → `RejectedError(error)`; `5xx` and a thrown `HttpFn` → `OfflineError`; `503` and `429` carry `Retry-After`, which the engine honours before retrying. A `503` means the vault is being re-keyed, never that it is gone.
 
 - [ ] **Step 1: Write the failing tests** with a recording fake `HttpFn`:
 
@@ -337,7 +337,7 @@ test("put sends the base version and maps 409 to a conflict", async () => {
     headers: { Authorization: "Bearer kumbu_x" }, body: JSON.stringify({ content: "text", version: "bbbbbbbbbbbb" }) });
 });
 test("a create sends no version", …);               // body JSON has no "version" key
-test("versions maps paths and deleted entries", …);   // { path:"/Work/a.md", deleted:true } → { path:"a.md", version:null }
+test("versions maps paths and deleted entries", …);   // deleted: ["/Work/a.md"] → { path:"a.md", version:null }
 test("versions sends If-None-Match and reads 304 as unchanged", …);
 test("delete sends ?version= and maps 404 to already gone", …);
 test("move always sends keepLinks true with API paths", …); // { from:"/Work/a.md", to:"/Work/b.md", keepLinks:true }
