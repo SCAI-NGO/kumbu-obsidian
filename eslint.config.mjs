@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { defineConfig, globalIgnores } from "eslint/config";
 import obsidianmd from "eslint-plugin-obsidianmd";
+import { DEFAULT_BRANDS } from "eslint-plugin-obsidianmd/dist/lib/rules/ui/brands.js";
 
 const noObsidian = {
   "no-restricted-imports": ["error", {
@@ -21,12 +22,24 @@ export default defineConfig([
     },
   },
   {
+    rules: {
+      // The product's names keep their casing in the middle of a sentence, like "Obsidian Sync".
+      "obsidianmd/ui/sentence-case": ["warn", { brands: [...DEFAULT_BRANDS, "Kumbu²", "Kumbu² Sync"] }],
+    },
+  },
+  {
+    // Chris decided: "Keep Kumbu²" always puts the local text in Obsidian's .trash, whatever the user's trash
+    // setting; only this adapter calls Vault.trash, for that one case (VaultFiles.trashToLocal).
+    files: ["src/obsidian/vaultFiles.ts"],
+    rules: { "obsidianmd/prefer-file-manager-trash-file": "off" },
+  },
+  {
     files: ["src/engine/**", "src/api/**", "src/live/**"],
     rules: noObsidian,
   },
   {
     // Build tooling runs in Node, never in Obsidian.
-    files: ["esbuild.config.mjs"],
+    files: ["esbuild.config.mjs", "vitest.config.ts"],
     languageOptions: { globals: { process: "readonly" } },
     rules: { "obsidianmd/no-nodejs-modules": "off" },
   },
