@@ -10,7 +10,7 @@ const noObsidian = {
 };
 
 export default defineConfig([
-  globalIgnores(["main.js", "node_modules/", "coverage/", ".superpowers/"]),
+  globalIgnores(["main.js", "node_modules/", "coverage/", ".superpowers/", ".e2e/"]),
   ...obsidianmd.configs.recommended,
   {
     languageOptions: {
@@ -55,5 +55,14 @@ export default defineConfig([
     files: ["test/**"],
     languageOptions: { globals: { setImmediate: "readonly", process: "readonly" } },
     rules: { "obsidianmd/hardcoded-config-path": "off", "obsidianmd/prefer-window-timers": "off" },
+  },
+  {
+    // The end-to-end run is a Node script against a real server, never loaded by Obsidian.
+    files: ["e2e/**"],
+    languageOptions: { globals: { process: "readonly", console: "readonly" } },
+    rules: {
+      "obsidianmd/no-nodejs-modules": "off", "obsidianmd/prefer-window-timers": "off", "obsidianmd/rule-custom-message": "off",
+      "no-restricted-globals": "off",
+    },
   },
 ]);

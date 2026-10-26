@@ -21,3 +21,6 @@ obisdian/.trash/
 
 # Superpowers skill workspace
 .superpowers/
+
+# End-to-end run bundle
+.e2e/

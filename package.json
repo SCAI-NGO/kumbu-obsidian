@@ -10,7 +10,7 @@
     "dev": "node esbuild.config.mjs",
     "lint": "eslint .",
     "test": "vitest run",
-    "e2e": "node --experimental-strip-types e2e/run.ts"
+    "e2e": "esbuild e2e/run.ts --bundle --platform=node --format=esm --target=node22 --outfile=.e2e/run.mjs --log-level=warning && node .e2e/run.mjs"
   },
   "engines": {
     "node": ">=22"
