@@ -30,8 +30,8 @@ export function markersIn(text: string): Set<string> {
 }
 
 /**
- * Markers (each edit appends one unique line) found in no surviving text (notes, conflict copies, `.trash`) and in
- * no text a delete removed on purpose.
+ * Markers (each edit appends one unique line) found in no surviving text (notes and conflict copies) and in no text
+ * a delete removed on purpose.
  */
 export function lostMarkers(written: string[], removed: string[], surviving: string[]): string[] {
   const seen = new Set<string>();

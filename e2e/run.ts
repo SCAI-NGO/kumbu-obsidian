@@ -156,10 +156,13 @@ async function compare(files: NodeFiles, agent: KumbuApi): Promise<{ diff: strin
   return { diff, remote, localPaths };
 }
 
-/** Markers in no note, conflict copy or `.trash` file (local, or in Kumbu²) and in no deleted text. */
+/**
+ * Markers in no note or conflict copy (local, or in Kumbu²) and in no deleted text. `.trash` doesn't count: every
+ * legitimate way into it is a recorded delete, so a marker found only there was trashed when it should have synced.
+ */
 async function lost(files: NodeFiles, remote: Map<string, string>): Promise<string[]> {
   const surviving = [...remote.values()];
-  for (const p of await files.list()) surviving.push(files.textOf(p) ?? "");
+  for (const p of await files.list()) if (!p.startsWith(".trash/")) surviving.push(files.textOf(p) ?? "");
   return lostMarkers(markers, removed, surviving);
 }
 
