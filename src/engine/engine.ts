@@ -257,10 +257,9 @@ export class SyncEngine {
   }
 
   private async finishCheck(answer: VersionsAnswer): Promise<void> {
-    if (answer.full) {
-      this.damaged = answer.damaged;
-      this.state.lastFullAt = new Date(this.o.clock.now()).toISOString();
-    }
+    // Every answer counts the vault's damaged notes; a damaged path is in neither list, so it is never "deleted".
+    this.damaged = answer.damaged;
+    if (answer.full) this.state.lastFullAt = new Date(this.o.clock.now()).toISOString();
     // Only after every path is done: a check that fails halfway asks again from the old cursor.
     this.state.cursor = answer.cursor;
     this.state.lastSyncAt = new Date(this.o.clock.now()).toISOString();

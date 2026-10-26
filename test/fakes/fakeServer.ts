@@ -18,6 +18,8 @@ export class FakeServer implements RemoteApi {
   readonly touches: { path: string; at: number }[] = [];
   readonly calls: { method: Method; args: unknown[] }[] = [];
   damaged = 0;
+  /** Paths whose stored note doesn't open: in neither list of an answer, only counted in `damaged`. */
+  readonly damagedPaths = new Set<string>();
   /** The writer label the device's own writes get. */
   deviceWriter = "Work – Obsidian Laptop";
   private readonly holds = new Map<Method, Promise<void>[]>();
@@ -42,6 +44,14 @@ export class FakeServer implements RemoteApi {
       return Promise.resolve(previous);
     }
     return this.store(path, content, "agent", at);
+  }
+
+  /** The stored note stops opening (as the server's damaged notes): gone from every list, counted in damaged. */
+  damage(path: string): void {
+    this.notes.delete(path);
+    this.damagedPaths.add(path);
+    this.damaged++;
+    this.touch(path);
   }
 
   /** Pauses the next call of that method until the returned function is called. */
@@ -79,7 +89,9 @@ export class FakeServer implements RemoteApi {
       return { full: true, entries, cursor, state: "s" + String(cursorAt), damaged: this.damaged, unchanged: false };
     }
     const touched = new Set(this.touches.filter((t) => t.at > sinceAt - OVERLAP_MS).map((t) => t.path));
-    const entries: RemoteEntry[] = [...touched].map((path) => ({ path, version: this.notes.get(path)?.version ?? null }));
+    const entries: RemoteEntry[] = [...touched]
+      .filter((path) => this.notes.has(path) || !this.damagedPaths.has(path))
+      .map((path) => ({ path, version: this.notes.get(path)?.version ?? null }));
     return { full: false, entries, cursor, state: null, damaged: this.damaged, unchanged: false };
   }
 

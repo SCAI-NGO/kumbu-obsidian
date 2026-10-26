@@ -139,8 +139,17 @@ describe("move", () => {
 });
 
 describe("errors", () => {
-  test("401 throws AuthError", async () => {
-    await expect(api(fakeHttp({ status: 401, body: { error: "revoked" } })).read("a.md")).rejects.toBeInstanceOf(AuthError);
+  test("401 throws AuthError from every call", async () => {
+    const revoked = () => fakeHttp({ status: 401, body: { error: "revoked" } });
+    await expect(api(revoked()).read("a.md")).rejects.toBeInstanceOf(AuthError);
+    await expect(api(revoked()).versions(null, null)).rejects.toBeInstanceOf(AuthError);
+    await expect(api(revoked()).versions("c", null)).rejects.toBeInstanceOf(AuthError);
+    await expect(api(revoked()).put("a.md", "x", null)).rejects.toBeInstanceOf(AuthError);
+    await expect(api(revoked()).put("a.md", "x", "bbbbbbbbbbbb")).rejects.toBeInstanceOf(AuthError);
+    await expect(api(revoked()).remove("a.md", "bbbbbbbbbbbb")).rejects.toBeInstanceOf(AuthError);
+    await expect(api(revoked()).move("a.md", "b.md")).rejects.toBeInstanceOf(AuthError);
+    await expect(api(revoked()).wsTicket()).rejects.toBeInstanceOf(AuthError);
+    await expect(api(revoked()).vaults()).rejects.toBeInstanceOf(AuthError);
   });
   test("413 throws RejectedError with the server sentence", async () => {
     const p = api(fakeHttp({ status: 413, body: { error: "Notes are at most 1 MiB." } })).put("a.md", "x", null);
@@ -200,6 +209,15 @@ describe("pairing", () => {
   });
   test("a bad device name keeps its status, so the code can be kept for a retry", async () => {
     await expect(redeemPairing(fakeHttp({ status: 400, body: { error: "Bad device name." } }), "https://k.example", "x", "L")).rejects.toMatchObject({ status: 400 });
+  });
+  test("a busy or failing server keeps the code: retry with the same one", async () => {
+    for (const reply of [{ status: 503, headers: { "Retry-After": "5" }, body: { error: "The vault is being re-encrypted." } }, { status: 500 }]) {
+      const p = redeemPairing(fakeHttp(reply), "https://k.example", "K7QM4XDA", "L");
+      await expect(p).rejects.toBeInstanceOf(OfflineError);
+      await expect(p).rejects.toThrow("Try again in a moment with the same code.");
+    }
+    const network = redeemPairing(fakeHttp(new TypeError("fetch failed")), "https://k.example", "K7QM4XDA", "L");
+    await expect(network).rejects.toThrow("Try again in a moment with the same code.");
   });
   test("too many attempts is rejected with the server's sentence", async () => {
     await expect(redeemPairing(fakeHttp({ status: 429, body: { error: "Too many attempts." } }), "https://k.example", "x", "L")).rejects.toThrow("Too many attempts.");

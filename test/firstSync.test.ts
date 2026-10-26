@@ -203,3 +203,15 @@ test("a check that comes in before the first sync has loaded its state waits for
   expect(h.files.files.get("d.md")).toBe("kumbu");
   expect([...h.files.files.keys()].filter((p) => p.includes("(conflict "))).toEqual([]);
 });
+
+test("a 401 during the first sync (a re-encrypted vault revokes device keys) means pair again, with no retries", async () => {
+  const h = await harness({ start: false, localOnly: { "a.md": "a" } });
+  const { AuthError } = await import("../src/engine/ports");
+  h.server.failNext("put", new AuthError("revoked"));
+  await expect(h.engine.firstSync(chooser("both"))).rejects.toBeInstanceOf(AuthError);
+  expect(h.authLost).toBe(1);
+  h.server.calls.length = 0;
+  await vi.advanceTimersByTimeAsync(30 * 60_000);
+  await h.engine.check(false);
+  expect(h.server.calls).toEqual([]);
+});

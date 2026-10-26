@@ -179,6 +179,18 @@ describe("normal use", () => {
     expect(h.engine.status().notSynced).toContainEqual(expect.objectContaining({ reason: "damaged-vault" }));
   });
 
+  test("a note that becomes damaged is never trashed locally, by a since or a full check", async () => {
+    const h = await harness({ synced: { "a.md": "one", "b.md": "b" } });
+    h.server.damage("a.md");
+    await h.engine.check(false);
+    expect(h.files.files.get("a.md")).toBe("one");
+    expect(h.engine.status().notSynced).toContainEqual(expect.objectContaining({ reason: "damaged-vault" }));
+    await h.engine.check(true);
+    expect(h.files.files.get("a.md")).toBe("one");
+    expect(h.files.systemTrash).toEqual([]);
+    expect(h.server.count("put")).toBe(0);
+  });
+
   test("a rename uses move with the base", async () => {
     const h = await harness({ synced: { "a.md": "one" } });
     h.files.userRename("a.md", "b.md");
@@ -367,6 +379,21 @@ describe("not synced", () => {
     const h = await harness({ synced: { "a.md": "one" }, localOnly: { "img/x.png": "png", ".obsidian/app.json": "{}" } });
     expect(h.engine.status().notSynced).toEqual([{ path: "img/x.png", reason: "attachment" }]);
     expect(h.server.notes.has("img/x.png")).toBe(false);
+  });
+
+  test("a 401 in the middle of an upload means pair again: reported once, and nothing retries", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    h.server.failNext("put", new AuthError("revoked"));
+    h.files.userEdit("a.md", "two");
+    h.engine.localChanged("a.md");
+    await settle(h, 2000);
+    expect(h.authLost).toBe(1);
+    expect(h.engine.status().mode).not.toBe("offline");
+    h.server.calls.length = 0;
+    await settle(h, 30 * 60_000);
+    await h.engine.check(false);
+    expect(h.server.calls).toEqual([]);
+    expect(h.authLost).toBe(1);
   });
 
   test("401 calls onAuthLost and stops", async () => {

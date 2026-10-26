@@ -116,9 +116,20 @@ export class KumbuApi implements RemoteApi {
   }
 }
 
+const RETRY_SAME_CODE = "Try again in a moment with the same code.";
+
 export async function redeemPairing(http: HttpFn, server: string, code: string, device: string): Promise<RedeemView> {
   const body: RedeemRequest = { code: normalisePairingCode(code), device: device.trim() };
-  const r = await call(http, { method: "POST", url: `${trimServer(server)}/api/pairing/redeem`, headers: {} }, body);
+  let r: HttpResponse;
+  try {
+    r = await call(http, { method: "POST", url: `${trimServer(server)}/api/pairing/redeem`, headers: {} }, body);
+  } catch (e) {
+    throw new OfflineError(`The server can't be reached. ${RETRY_SAME_CODE}`, e instanceof OfflineError ? e.retryAfterMs : null);
+  }
+  // A vault being re-encrypted (503) or a passing server error (5xx) leaves the code valid.
+  if (r.status >= 500) {
+    throw new OfflineError(`${errorOf(r) ?? `The server answered ${r.status}.`} ${RETRY_SAME_CODE}`, retryAfterMs(r));
+  }
   if (r.status === 409) {
     // Every "<Vault> – Obsidian <device>" name up to " 20" is taken, and the code is used up.
     throw new RejectedError(`${errorOf(r) ?? "That key name is taken."} Change the device name and make a new code in the web app.`, 409);

@@ -260,7 +260,7 @@ export default class KumbuSyncPlugin extends Plugin {
   }
 
   private authLost(): void {
-    new Notice("Kumbu² Sync: this key expired or was revoked. Pair again in the settings.");
+    new Notice("Kumbu² Sync: this device's key no longer works (revoked, expired, or its vault was re-encrypted). Pair again in the settings.");
     void this.forgetConnection();
   }
 
