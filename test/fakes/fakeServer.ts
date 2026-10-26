@@ -34,11 +34,12 @@ export class FakeServer implements RemoteApi {
    * An agent's edit (content) or delete (null), stamped with the clock, or with `at` for a write stamped before it
    * was committed (the case the server's 5-minute overlap is for).
    */
-  agentWrite(path: string, content: string | null, at?: number): Promise<void> {
+  agentWrite(path: string, content: string | null, at?: number): Promise<string | undefined> {
     if (content === null) {
+      const previous = this.notes.get(path)?.content;
       this.notes.delete(path);
       this.touch(path, at);
-      return Promise.resolve();
+      return Promise.resolve(previous);
     }
     return this.store(path, content, "agent", at);
   }
@@ -118,10 +119,14 @@ export class FakeServer implements RemoteApi {
     return { ok: true, version: existing.version };
   }
 
-  private async store(path: string, content: string, writer: string, at = this.now()): Promise<void> {
+  /** Returns the text it replaced, as it was at the moment of the write (a blind write, like an agent's). */
+  private async store(path: string, content: string, writer: string, at = this.now()): Promise<string | undefined> {
     const text = normaliseText(content);
-    this.notes.set(path, { content: text, lastWriter: writer, at: new Date(at).toISOString(), version: await versionOf(text) });
+    const version = await versionOf(text);
+    const previous = this.notes.get(path)?.content;
+    this.notes.set(path, { content: text, lastWriter: writer, at: new Date(at).toISOString(), version });
     this.touch(path, at);
+    return previous;
   }
 
   private touch(path: string, at = this.now()): void {

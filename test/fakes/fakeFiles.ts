@@ -58,6 +58,7 @@ export class FakeFiles implements LocalFiles {
     const p = this.existing(path);
     const now = p === undefined ? null : await versionOf(this.editors.get(p) ?? this.files.get(p)!);
     if (now !== expected) return false;
+    if (p === undefined && this.clashes(path)) return false;
     this.beforeWrite?.(path);
     this.writes++;
     this.files.set(p ?? path, content);
@@ -87,14 +88,15 @@ export class FakeFiles implements LocalFiles {
     into.push(p);
   }
 
-  /** The stored key for a path: exact, else NFC-equal, else (case-insensitive only) case-equal. */
+  /** Exact, like Obsidian's getFileByPath: no NFC or case folding, so an engine call with the wrong spelling fails here too. */
   private existing(path: string): string | undefined {
-    if (this.files.has(path)) return path;
-    const nfc = path.normalize("NFC");
-    for (const k of this.files.keys()) {
-      const kn = k.normalize("NFC");
-      if (kn === nfc || (this.caseInsensitive && kn.toLowerCase() === nfc.toLowerCase())) return k;
-    }
-    return undefined;
+    return this.files.has(path) ? path : undefined;
+  }
+
+  /** On a case-insensitive file system another spelling of the same name is the same file: a create fails. */
+  private clashes(path: string): boolean {
+    const nfc = path.normalize("NFC").toLowerCase();
+    return [...this.files.keys()].some((k) => k !== path && (k.normalize("NFC") === path.normalize("NFC")
+      || (this.caseInsensitive && k.normalize("NFC").toLowerCase() === nfc)));
   }
 }

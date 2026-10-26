@@ -222,7 +222,8 @@ test("randomised: 200 seeded rounds of mixed user and agent operations converge 
       for (const [original] of h.conflicts.slice(conflictsBefore)) {
         expect(userTouched.has(original) && agentTouched.has(original), `unexpected conflict copy for ${original}`).toBe(true);
       }
-      expectConverged(h.server, h.files, [...h.files.files.keys()].filter(isCopy).length);
+      // Copies are never edited or deleted in this run, so every one made is still there, and no other.
+      expectConverged(h.server, h.files, h.conflicts.length);
       expect(h.engine.status().mode).not.toBe("offline");
     }
   } catch (e) {
@@ -265,3 +266,72 @@ test("typing between writing the conflict copy and replacing the original update
   expect(h.files.files.get("a.md")).toBe("agent");
   expectConverged(h.server, h.files, 1);
 });
+
+test("randomised: concurrent rounds of user and agent edits never lose an edit", async () => {
+  const seed = Number(process.env.RACE_SEED ?? 20261028);
+  const random = prng(seed);
+  const pick = <T,>(xs: T[]): T => xs[Math.floor(random() * xs.length)]!;
+  const names = ["a", "b", "c", "d", "e"].map((n) => `${n}.md`);
+  const h = await harness({ synced: { "a.md": "a0", "b.md": "b0", "c.md": "c0" } });
+  const u = user(h);
+  // Every text either side wrote must survive somewhere, unless a side replaced or deleted it while it could see
+  // it: the user what is in the local file, the agent what is on the server.
+  const mustSurvive = new Set<string>();
+  const seen = (content: string | undefined) => {
+    for (const t of [...mustSurvive]) if (content?.includes(t)) mustSurvive.delete(t);
+  };
+  let round = 0;
+  let log: string[] = [];
+  try {
+    for (round = 0; round < 150; round++) {
+      log = [];
+      const ops = 1 + Math.floor(random() * 4);
+      for (let i = 0; i < ops; i++) {
+        const r = random();
+        const localNotes = [...h.files.files.keys()].filter((p) => !isCopy(p));
+        const remoteNotes = [...h.server.notes.keys()].filter((p) => !isCopy(p));
+        if (r < 0.35) {
+          const p = pick(names);
+          const text = `«user ${round}.${i}»`;
+          log.push(`user edits ${p}`);
+          seen(h.files.files.get(p));
+          u.edit(p, text);
+          mustSurvive.add(text);
+        } else if (r < 0.45 && localNotes.length > 0) {
+          const p = pick(localNotes);
+          log.push(`user deletes ${p}`);
+          seen(h.files.files.get(p));
+          u.remove(p);
+        } else if (r < 0.55 && localNotes.length > 0) {
+          const from = pick(localNotes);
+          const to = names.find((n) => !h.files.files.has(n));
+          if (to !== undefined) {
+            log.push(`user renames ${from} to ${to}`);
+            u.rename(from, to);
+          }
+        } else if (r < 0.9) {
+          const p = pick(names);
+          const text = `«agent ${round}.${i}»`;
+          log.push(`agent writes ${p}`);
+          // A blind write: what it replaces is what was there when it landed, which the agent overwrote.
+          seen(await h.server.agentWrite(p, text));
+          mustSurvive.add(text);
+        } else if (remoteNotes.length > 0) {
+          const p = pick(remoteNotes);
+          log.push(`agent deletes ${p}`);
+          seen(await h.server.agentWrite(p, null));
+        }
+        // Short waits only: edits in a round are concurrent (only a delete syncs at once, without a debounce).
+        await vi.advanceTimersByTimeAsync(Math.floor(random() * 300));
+      }
+      await quiet(h);
+      const contents = [...h.files.files.values()];
+      for (const text of mustSurvive) expect(contents.some((c) => c.includes(text)), `lost ${text}`).toBe(true);
+      expectConverged(h.server, h.files, h.conflicts.length);
+    }
+  } catch (e) {
+    const dump = (m: Iterable<[string, string]>) => [...m].map(([p, t]) => `${p}=${t.replace(/[\s\S]*\n\n/, "copy:")}`).join(" | ");
+    throw new Error(`no-loss run failed in round ${round} with RACE_SEED=${seed} after ${log.join(", ")}: ${e instanceof Error ? e.message : String(e)}`
+      + `\nlocal: ${dump(h.files.files)}\nserver: ${dump([...h.server.notes].map(([p, n]) => [p, n.content]))}`);
+  }
+}, 60_000);
