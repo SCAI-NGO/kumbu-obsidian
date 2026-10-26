@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // LocalFiles over node:fs in one folder, for the end-to-end run. The check and the write in writeIf are synchronous,
 // as Obsidian's editor and Vault.process are, so nothing else on the event loop can land between them.
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import type { LocalFiles, Version } from "../src/engine/ports";
@@ -99,6 +99,13 @@ export class NodeFiles implements LocalFiles {
     mkdirSync(dirname(this.abs(to)), { recursive: true });
     renameSync(this.abs(from), this.abs(to));
     return Promise.resolve();
+  }
+
+  removeFolderIfEmpty(path: string): Promise<boolean> {
+    const dir = this.abs(path);
+    if (!existsSync(dir) || !statSync(dir).isDirectory() || readdirSync(dir).length > 0) return Promise.resolve(false);
+    rmdirSync(dir);
+    return Promise.resolve(true);
   }
 
   private toTrash(path: string): void {

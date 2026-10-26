@@ -49,6 +49,8 @@ export interface LocalFiles {
    */
   trashIf(path: string, expected: Version): Promise<boolean>;
   rename(from: string, to: string): Promise<void>;
+  /** Deletes the folder if it has nothing in it at all, dot files included. True if it deleted it. */
+  removeFolderIfEmpty(path: string): Promise<boolean>;
 }
 
 export interface SyncState {

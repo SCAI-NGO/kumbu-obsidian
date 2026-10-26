@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import type { App } from "obsidian";
-import { MarkdownView, TFile } from "./fakes/obsidian";
+import { MarkdownView, TFile, TFolder } from "./fakes/obsidian";
 import { VaultFiles } from "../src/obsidian/vaultFiles";
 import { versionOfSync } from "../src/engine/version";
 
@@ -157,4 +157,43 @@ test("trashIf keeps a note changed on disk", async () => {
   const f = fakeApp({ "a.md": "changed" });
   expect(await new VaultFiles(f.app).trashIf("a.md", versionOfSync("base"))).toBe(false);
   expect(f.trashed).toEqual([]);
+});
+
+describe("removeFolderIfEmpty", () => {
+  /** A folder as Obsidian's index has it (no dot files) and as the adapter lists it on disk (dot files too). */
+  function folderApp(indexed: string[], onDisk: string[]) {
+    const deleted: string[] = [];
+    const app = {
+      vault: {
+        getFolderByPath: (p: string) => (p === "a" ? Object.assign(new TFolder("a"), { children: indexed.map((c) => new TFile(c)) }) : null),
+        adapter: { list: () => Promise.resolve({ files: onDisk, folders: [] }) },
+        delete: (f: TFolder) => { deleted.push(f.path); return Promise.resolve(); },
+      },
+    };
+    return { app: app as unknown as App, deleted };
+  }
+
+  test("deletes an empty folder through the vault", async () => {
+    const f = folderApp([], []);
+    expect(await new VaultFiles(f.app).removeFolderIfEmpty("a")).toBe(true);
+    expect(f.deleted).toEqual(["a"]);
+  });
+
+  test("keeps a folder with a file in it, of any kind", async () => {
+    const f = folderApp(["a/picture.png"], ["a/picture.png"]);
+    expect(await new VaultFiles(f.app).removeFolderIfEmpty("a")).toBe(false);
+    expect(f.deleted).toEqual([]);
+  });
+
+  test("keeps a folder whose only file is a dot file Obsidian doesn't index", async () => {
+    const f = folderApp([], ["a/.DS_Store"]);
+    expect(await new VaultFiles(f.app).removeFolderIfEmpty("a")).toBe(false);
+    expect(f.deleted).toEqual([]);
+  });
+
+  test("does nothing for a folder that isn't there", async () => {
+    const f = folderApp([], []);
+    expect(await new VaultFiles(f.app).removeFolderIfEmpty("gone")).toBe(false);
+    expect(f.deleted).toEqual([]);
+  });
 });

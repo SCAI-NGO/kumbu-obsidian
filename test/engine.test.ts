@@ -408,3 +408,74 @@ describe("not synced", () => {
     expect(h.server.calls.map((c) => c.method)).toEqual(["versions"]);
   });
 });
+
+describe("folders a remote change left empty", () => {
+  test("a remote folder move removes the old local folder", async () => {
+    const h = await harness({ synced: { "Test/a/one.md": "1", "Test/a/two.md": "2", "Test/a/three.md": "3" } });
+    for (const name of ["one", "two", "three"]) await h.server.move(`Test/a/${name}.md`, `Test/b/${name}.md`);
+    await h.engine.check(false);
+    expect([...h.files.files.keys()].sort()).toEqual(["Test/b/one.md", "Test/b/three.md", "Test/b/two.md"]);
+    expect(h.files.removedFolders).toEqual(["Test/a"]);
+    expect(h.files.folders.has("Test/a")).toBe(false);
+  });
+
+  test("a remote delete of the last note removes each folder that is empty afterwards, upwards", async () => {
+    const h = await harness({ synced: { "a/b/c/note.md": "n" } });
+    await h.server.agentWrite("a/b/c/note.md", null);
+    await h.engine.check(false);
+    expect(h.files.removedFolders).toEqual(["a/b/c", "a/b", "a"]);
+    expect(h.files.folders.size).toBe(0);
+  });
+
+  test("a parent that still holds a note stays", async () => {
+    const h = await harness({ synced: { "a/b/c/note.md": "n", "a/keep.md": "k" } });
+    await h.server.agentWrite("a/b/c/note.md", null);
+    await h.engine.check(false);
+    expect(h.files.removedFolders).toEqual(["a/b/c", "a/b"]);
+    expect(h.files.files.has("a/keep.md")).toBe(true);
+  });
+
+  test("a remote delete of one of two notes keeps the folder", async () => {
+    const h = await harness({ synced: { "a/one.md": "1", "a/two.md": "2" } });
+    await h.server.agentWrite("a/one.md", null);
+    await h.engine.check(false);
+    expect(h.files.files.has("a/two.md")).toBe(true);
+    expect(h.files.removedFolders).toEqual([]);
+  });
+
+  test("an empty folder the user made stays, elsewhere and next to the removed one", async () => {
+    const h = await harness({ synced: { "a/note.md": "n" } });
+    h.files.folders.add("drafts");
+    h.files.folders.add("a/empty by hand");
+    await h.server.agentWrite("a/note.md", null);
+    await h.engine.check(false);
+    // The user's folder inside keeps "a" too: it isn't empty.
+    expect(h.files.removedFolders).toEqual([]);
+    expect(h.files.folders).toEqual(new Set(["a", "drafts", "a/empty by hand"]));
+  });
+
+  test("a remote rename within the folder leaves no stray folder and removes none", async () => {
+    const h = await harness({ synced: { "a/old.md": "n" } });
+    await h.server.move("a/old.md", "a/new.md");
+    await h.engine.check(false);
+    expect([...h.files.files.keys()]).toEqual(["a/new.md"]);
+    expect(h.files.removedFolders).toEqual([]);
+  });
+
+  test("a folder that still holds a file that isn't a note stays", async () => {
+    const h = await harness({ synced: { "a/note.md": "n" }, localOnly: { "a/picture.png": "png" } });
+    await h.server.agentWrite("a/note.md", null);
+    await h.engine.check(false);
+    expect(h.files.files.has("a/picture.png")).toBe(true);
+    expect(h.files.removedFolders).toEqual([]);
+  });
+
+  test("a local delete by the user leaves the folder to Obsidian", async () => {
+    const h = await harness({ synced: { "a/note.md": "n" } });
+    h.files.userDelete("a/note.md");
+    h.engine.localDeleted("a/note.md");
+    await settle(h);
+    expect(h.server.notes.has("a/note.md")).toBe(false);
+    expect(h.files.removedFolders).toEqual([]);
+  });
+});
