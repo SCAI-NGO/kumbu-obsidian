@@ -104,3 +104,12 @@ test("an interrupted first sync finishes on the next run without duplicates or c
   expect(h.files.files.size).toBe(5);
   expect(copies(h.files.files.keys())).toEqual([]);
 });
+
+test("keep local with a note the server refuses lists it and finishes", async () => {
+  const h = await harness({ start: false, localOnly: { "d.md": "local", "e.md": "e" }, remoteOnly: { "d.md": "kumbu" } });
+  const { RejectedError } = await import("../src/engine/ports");
+  h.server.failNext("put", new RejectedError("Not allowed."));
+  const summary = await h.engine.firstSync(chooser("local"));
+  expect(summary!.notSynced).toContainEqual({ path: "d.md", reason: "rejected", detail: "Not allowed." });
+  expect(h.server.notes.get("e.md")!.content).toBe("e");
+});

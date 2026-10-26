@@ -174,6 +174,27 @@ describe("normal use", () => {
     expect(h.server.notes.get("b.md")!.content).toBe("two");
   });
 
+  test("a rename the server refuses falls back to delete plus create and is not read as offline", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    h.server.failNext("move", new RejectedError("Names may not contain ':'."));
+    h.files.userRename("a.md", "b.md");
+    h.engine.localRenamed("a.md", "b.md");
+    await settle(h);
+    expect(h.engine.status().mode).not.toBe("offline");
+    expect(h.server.notes.has("a.md")).toBe(false);
+    expect(h.server.notes.get("b.md")!.content).toBe("one");
+  });
+
+  test("a delete the server refuses is listed, not retried as offline", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    h.server.failNext("remove", new RejectedError("Not allowed."));
+    h.files.userDelete("a.md");
+    h.engine.localDeleted("a.md");
+    await settle(h);
+    expect(h.engine.status().mode).not.toBe("offline");
+    expect(h.engine.status().notSynced).toContainEqual({ path: "a.md", reason: "rejected", detail: "Not allowed." });
+  });
+
   test("real conflict: server keeps the path, local text becomes a conflict copy", async () => {
     const h = await harness({ synced: { "projects/Plan.md": "one" } });
     await h.server.agentWrite("projects/Plan.md", "agent");

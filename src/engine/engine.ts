@@ -6,7 +6,7 @@ import { makePlan, type Choice, type FirstSyncSummary, type MergePlan } from "./
 import { conflictCopyPath, eligibility } from "./paths";
 import {
   AuthError, OfflineError, RejectedError,
-  type Clock, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi, type StateStore,
+  type Clock, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi, type StateStore,
   type SyncState, type SyncStatus, type Version,
 } from "./ports";
 import { SerialQueue } from "./queue";
@@ -163,7 +163,13 @@ export class SyncEngine {
       const text = await this.o.local.read(to);
       const now = text === null ? null : await versionOf(text);
       if (base !== undefined && now === base && this.state.bases[tk] === undefined) {
-        const moved = await this.o.remote.move(fk, tk);
+        let moved: MoveResult = { ok: false };
+        try {
+          moved = await this.o.remote.move(fk, tk);
+        } catch (e) {
+          // A name the server refuses: the delete plus create below meets the same rule and lists it.
+          if (!(e instanceof RejectedError)) throw e;
+        }
         if (moved.ok) {
           // A move takes whatever the note is now, so an agent's edit may have come along: the base stays what
           // this device agreed on, and a different moved version is decided at once (downloaded, or a conflict).
@@ -360,7 +366,14 @@ export class SyncEngine {
       return false;
     }
     const local = await versionOf(text);
-    const again = await this.upload(key, text, local, remote);
+    let again: Again | undefined;
+    try {
+      again = await this.upload(key, text, remote);
+    } catch (e) {
+      if (!(e instanceof RejectedError)) throw e;
+      this.rejected.set(key, { version: local, detail: e.message });
+      return false;
+    }
     // The server changed since the list: decided as usual, which keeps both texts.
     if (again !== undefined) await this.syncPath(key, again.remote, false);
     return again === undefined && this.state.bases[key] === local;
@@ -412,7 +425,19 @@ export class SyncEngine {
       const local = text === null ? null : await versionOf(text);
       const base = this.state.bases[key] ?? null;
       const action = decide({ local, remote, base, remoteDamagedPossible: damagedPossible });
-      const again = await this.act(key, path, text, local, remote, action);
+      // A change of this device's the server refused is not sent again until the file changes again.
+      const outgoing = action.kind === "upload" || action.kind === "reupload" || action.kind === "deleteRemote";
+      if (outgoing && this.rejected.get(key)?.version === (local ?? "")) return;
+      let again: Again | undefined;
+      try {
+        again = await this.act(key, path, text, local, remote, action);
+      } catch (e) {
+        if (!(e instanceof RejectedError)) throw e;
+        this.rejected.set(key, { version: local ?? "", detail: e.message });
+        this.dirty.delete(key);
+        return;
+      }
+      if (outgoing) this.rejected.delete(key);
       if (again === undefined) {
         this.dirty.delete(key);
         return;
@@ -439,7 +464,7 @@ export class SyncEngine {
 
       case "upload":
       case "reupload":
-        return this.upload(key, text!, local!, action.kind === "upload" ? action.base : null);
+        return this.upload(key, text!, action.kind === "upload" ? action.base : null);
 
       case "download": {
         const note = await this.o.remote.read(key);
@@ -475,22 +500,13 @@ export class SyncEngine {
     }
   }
 
-  private async upload(key: string, text: string, local: Version, base: Version | null): Promise<Again | undefined> {
-    if (this.rejected.get(key)?.version === local) return undefined;
-    this.rejected.delete(key);
+  private async upload(key: string, text: string, base: Version | null): Promise<Again | undefined> {
     if (byteSize(text) > MAX_BYTES) {
       this.tooLarge.add(key);
       return undefined;
     }
     this.tooLarge.delete(key);
-    let result;
-    try {
-      result = await this.o.remote.put(key, text, base);
-    } catch (e) {
-      if (!(e instanceof RejectedError)) throw e;
-      this.rejected.set(key, { version: local, detail: e.message });
-      return undefined;
-    }
+    const result = await this.o.remote.put(key, text, base);
     if (!result.ok) return { remote: result.conflict.version };
     await this.setBase(key, result.version);
     return undefined;
