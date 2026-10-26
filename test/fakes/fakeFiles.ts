@@ -9,6 +9,9 @@ export class FakeFiles implements LocalFiles {
   readonly editors = new Map<string, string>();
   readonly trash: string[] = [];
   readonly systemTrash: string[] = [];
+  /** Folders with no file in them, which a map of files can't show: made by the user, or left behind by a file. */
+  readonly folders = new Set<string>();
+  readonly removedFolders: string[] = [];
   caseInsensitive = false;
   /** Runs inside writeIf after the check and before the write, to model a race the real adapter can't have. */
   beforeWrite: ((path: string) => void) | null = null;
@@ -31,14 +34,14 @@ export class FakeFiles implements LocalFiles {
 
   userDelete(path: string): void {
     const p = this.existing(path);
-    if (p !== undefined) this.files.delete(p);
+    if (p !== undefined) this.forget(p);
   }
 
   userRename(from: string, to: string): void {
     const p = this.existing(from);
     if (p === undefined) return;
     const text = this.files.get(p)!;
-    this.files.delete(p);
+    this.forget(p);
     this.files.set(to, text);
   }
 
@@ -87,11 +90,27 @@ export class FakeFiles implements LocalFiles {
     return Promise.resolve();
   }
 
+  removeFolderIfEmpty(path: string): Promise<boolean> {
+    const inside = (p: string) => p.startsWith(`${path}/`);
+    const empty = ![...this.files.keys()].some(inside) && ![...this.folders].some(inside);
+    if (!this.folders.has(path) || !empty) return Promise.resolve(false);
+    this.folders.delete(path);
+    this.removedFolders.push(path);
+    return Promise.resolve(true);
+  }
+
   private remove(path: string, into: string[]): void {
     const p = this.existing(path);
     if (p === undefined) return;
-    this.files.delete(p);
+    this.forget(p);
     into.push(p);
+  }
+
+  /** Deletes a file and keeps its folders, as a file system does. */
+  private forget(path: string): void {
+    this.files.delete(path);
+    const segments = path.split("/");
+    for (let i = 1; i < segments.length; i++) this.folders.add(segments.slice(0, i).join("/"));
   }
 
   /** Exact, like Obsidian's getFileByPath: no NFC or case folding, so an engine call with the wrong spelling fails here too. */

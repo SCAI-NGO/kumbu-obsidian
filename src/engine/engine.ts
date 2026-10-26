@@ -60,6 +60,11 @@ export class SyncEngine {
   private retryHandle: unknown = null;
   private retryDelay = 0;
   private copiesMade = 0;
+  /**
+   * Folders a remote delete or move took a note out of. Kumbu² has no empty folders, so each is deleted once it is
+   * empty, after the job: a move's new note may land in the same folder later in that job.
+   */
+  private readonly leftFolders = new Set<string>();
   /** Set while a first sync hasn't finished: checks retry it, and local events wait for it. */
   private firstSyncChoose: ((plan: MergePlan) => Promise<Choice | null>) | null = null;
   private loading: Promise<void> = Promise.resolve();
@@ -213,6 +218,7 @@ export class SyncEngine {
       this.emit();
       try {
         if ((await job()) !== false) this.online();
+        await this.removeLeftFolders();
       } catch (e) {
         this.failed(e);
       } finally {
@@ -331,6 +337,7 @@ export class SyncEngine {
       try {
         await this.loading;
         outcome.summary = await this.runFirstSync(choose);
+        await this.removeLeftFolders();
         if (this.stopped) {
           // Not a cancelled question: the plugin keeps the connection, and the next start finishes the job.
           outcome.summary = null;
@@ -530,6 +537,7 @@ export class SyncEngine {
         // Checked by the adapter right before it trashes: a keystroke since the read makes it an edit to upload
         // (remote gone, local changed: reupload), not a file to trash.
         if (local === null || !(await this.o.local.trashIf(path, local))) return { remote };
+        this.leftFolders.add(parentOf(path));
         delete this.state.bases[key];
         await this.save();
         return undefined;
@@ -603,6 +611,20 @@ export class SyncEngine {
     return path;
   }
 
+  /** Deletes the left folders that are empty now, and then their parents the same way, never the vault root. */
+  private async removeLeftFolders(): Promise<void> {
+    // Deepest first, so a parent is looked at only after its emptied children are gone.
+    const folders = [...this.leftFolders].sort((a, b) => b.split("/").length - a.split("/").length);
+    for (let folder of folders) {
+      // A dot folder (.obsidian, .trash) is never synced, so no remote change can have emptied it.
+      while (folder !== "" && eligibility(folder) !== "ignored" && (await this.o.local.removeFolderIfEmpty(folder))) {
+        folder = parentOf(folder);
+      }
+    }
+    // Only now: a failure keeps them for the next job.
+    this.leftFolders.clear();
+  }
+
   private forgetProblems(key: string): void {
     this.rejected.delete(key);
     this.tooLarge.delete(key);
@@ -660,6 +682,11 @@ export class SyncEngine {
   private emit(): void {
     this.o.onStatus(this.status());
   }
+}
+
+/** "a/b/c.md" → "a/b"; "c.md" → "". */
+function parentOf(path: string): string {
+  return path.slice(0, Math.max(0, path.lastIndexOf("/")));
 }
 
 /** Ordinal order, the same on every device. */

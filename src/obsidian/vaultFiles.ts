@@ -88,6 +88,16 @@ export class VaultFiles implements LocalFiles {
     await this.app.vault.rename(file, to);
   }
 
+  async removeFolderIfEmpty(path: string): Promise<boolean> {
+    const folder = this.app.vault.getFolderByPath(path);
+    if (!folder || folder.children.length > 0) return false;
+    // Obsidian's index leaves out dot files (".DS_Store", a ".git" folder); the adapter lists what is on disk.
+    const listed = await this.app.vault.adapter.list(path);
+    if (listed.files.length > 0 || listed.folders.length > 0) return false;
+    await this.app.vault.delete(folder);
+    return true;
+  }
+
   private editorsOf(file: TFile): MarkdownView[] {
     return this.app.workspace
       .getLeavesOfType("markdown")
