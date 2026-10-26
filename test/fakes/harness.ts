@@ -2,6 +2,7 @@
 // Wires a SyncEngine to the fakes, with Vitest's fake timers as the clock.
 import { vi } from "vitest";
 import { SyncEngine } from "../../src/engine/engine";
+import type { FirstSyncSummary } from "../../src/engine/firstSync";
 import type { Clock, StateStore, SyncState, SyncStatus } from "../../src/engine/ports";
 import { versionOf } from "../../src/engine/version";
 import { FakeFiles } from "./fakeFiles";
@@ -22,7 +23,7 @@ export const fakeClock: Clock = {
 
 export interface Harness {
   engine: SyncEngine; server: FakeServer; files: FakeFiles; state: MemoryState;
-  conflicts: [string, string][]; authLost: number; statuses: SyncStatus[];
+  conflicts: [string, string][]; authLost: number; statuses: SyncStatus[]; firstSyncsDone: FirstSyncSummary[];
 }
 
 /**
@@ -46,12 +47,13 @@ export async function harness(o: {
   for (const [p, t] of Object.entries(o.localOnly ?? {})) files.files.set(p, t);
   for (const [p, t] of Object.entries(o.remoteOnly ?? {})) await server.seed(p, t);
   const state = new MemoryState({ bases, cursor: null, lastFullAt: null, lastSyncAt: null });
-  const h: Harness = { engine: undefined as unknown as SyncEngine, server, files, state, conflicts: [], authLost: 0, statuses: [] };
+  const h: Harness = { engine: undefined as unknown as SyncEngine, server, files, state, conflicts: [], authLost: 0, statuses: [], firstSyncsDone: [] };
   h.engine = new SyncEngine({
     vault: "Work", device: "Laptop", local: files, remote: server, state, clock: fakeClock,
     onStatus: (s) => h.statuses.push(s),
     onConflict: (original, copy) => h.conflicts.push([original, copy]),
     onAuthLost: () => { h.authLost++; },
+    onFirstSyncDone: (summary) => h.firstSyncsDone.push(summary),
   });
   if (o.start !== false) await h.engine.start();
   server.calls.length = 0;

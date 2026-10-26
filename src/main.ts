@@ -92,18 +92,19 @@ export default class KumbuSyncPlugin extends Plugin {
     const engine = this.buildEngine(api);
     this.api = api;
     this.engine = engine;
+    // Hints and polling run from the start: a reconnect after a network loss also retries an unfinished first sync.
+    this.startHints(api, engine);
     if (this.data.state.cursor === null) {
       await this.firstSync(engine);
       return;
     }
     await engine.start();
-    this.startHints(api, engine);
   }
 
+  /** An unfinished first sync is retried by the engine's check, with the choice already made. */
   async syncNow(): Promise<void> {
-    if (!this.engine) await this.startSync();
-    else if (this.data.state.cursor === null) await this.startSync();
-    else await this.engine.check(false);
+    if (this.engine) await this.engine.check(false);
+    else await this.startSync();
   }
 
   /** Pairing: the code becomes a device key in SecretStorage, then the first sync runs. */
@@ -165,18 +166,15 @@ export default class KumbuSyncPlugin extends Plugin {
     try {
       summary = await engine.firstSync((plan) => new ConflictChoiceModal(this.app, plan, s.vault, s.device).choose());
     } catch (e) {
-      if (e instanceof AuthError) return;
+      // Lost key: onAuthLost said so. Stopped (Disconnect, unload): nothing to say.
+      if (e instanceof AuthError || this.engine !== engine) return;
       const why = e instanceof OfflineError ? e.message : "an unexpected error";
-      new Notice(`Kumbu² Sync: the first sync stopped (${why}). It goes on with "Sync now" or the next start.`);
+      new Notice(`Kumbu² Sync: the first sync stopped (${why}). It goes on by itself once the server can be reached.`);
       return;
     }
-    if (summary === null) {
-      // Cancelled: not connected, nothing kept but the server and the device name.
-      await this.forgetConnection();
-      return;
-    }
-    new ResultModal(this.app, s.vault, summary).open();
-    if (this.api && this.engine === engine) this.startHints(this.api, engine);
+    // Cancelled: not connected, nothing kept but the server and the device name. (A finished one shows its
+    // result through onFirstSyncDone, also when it finishes on a retry.)
+    if (summary === null) await this.forgetConnection();
   }
 
   private async forgetConnection(): Promise<void> {
@@ -242,6 +240,7 @@ export default class KumbuSyncPlugin extends Plugin {
         new Notice(`Kumbu² Sync: ${original} was changed on both sides. Your text is in ${copy}.`);
       },
       onAuthLost: () => this.authLost(),
+      onFirstSyncDone: (summary) => new ResultModal(this.app, this.data.settings.vault, summary).open(),
     });
   }
 

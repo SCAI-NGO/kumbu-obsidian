@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The first sync's merge plan (spec §6, "First sync"): what each side has, and what needs one choice.
-import type { NotSynced, Version } from "./ports";
+import type { NotSynced, SyncState, Version } from "./ports";
 
-export type Choice = "both" | "local" | "kumbu";
+export type Choice = NonNullable<SyncState["pendingChoice"]>;
 export interface MergePlan { toUpload: string[]; toDownload: string[]; same: string[]; differing: string[]; notSynced: NotSynced[]; }
 export interface FirstSyncSummary { uploaded: number; downloaded: number; unchanged: number; conflictCopies: number; notSynced: NotSynced[]; }
 

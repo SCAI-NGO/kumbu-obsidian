@@ -44,6 +44,8 @@ export interface LocalFiles {
 export interface SyncState {
   bases: Record<string, Version>; // vault-relative path → agreed version
   cursor: string | null; lastFullAt: string | null; lastSyncAt: string | null;
+  /** The first sync's answer to its one question, kept until the first sync is done, so it is never asked twice. */
+  pendingChoice?: "both" | "local" | "kumbu" | null;
 }
 export interface StateStore { load(): Promise<SyncState>; save(state: SyncState): Promise<void>; }
 export interface Clock { now(): number; setTimeout(fn: () => void, ms: number): unknown; clearTimeout(handle: unknown): void; }

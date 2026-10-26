@@ -17,6 +17,8 @@ export interface EngineOptions {
   onStatus(s: SyncStatus): void;
   onConflict(original: string, copy: string): void;
   onAuthLost(): void;
+  /** A first sync finished, also one that finished on a retry after its first attempt failed. */
+  onFirstSyncDone?(summary: FirstSyncSummary): void;
 }
 
 const DEBOUNCE_MS = 2000;
@@ -54,6 +56,8 @@ export class SyncEngine {
   private retryHandle: unknown = null;
   private retryDelay = 0;
   private copiesMade = 0;
+  /** Set while a first sync hasn't finished: checks retry it, and local events wait for it. */
+  private firstSyncChoose: ((plan: MergePlan) => Promise<Choice | null>) | null = null;
 
   constructor(o: EngineOptions) {
     this.o = o;
@@ -159,6 +163,7 @@ export class SyncEngine {
     this.dirty.add(fk);
     this.dirty.add(tk);
     void this.run(async () => {
+      if (this.firstSyncChoose !== null) return false;
       const base = this.state.bases[fk];
       const text = await this.o.local.read(to);
       const now = text === null ? null : await versionOf(text);
@@ -189,19 +194,20 @@ export class SyncEngine {
   /** `full`: start, visible again, hourly; otherwise (hint, "Sync now", poll) only what changed since the cursor. */
   check(full: boolean): Promise<void> {
     if (this.stopped) return Promise.resolve();
+    if (this.firstSyncChoose !== null) return this.firstSyncJob().then(() => undefined);
     const last = this.state.lastSyncAt === null ? NaN : Date.parse(this.state.lastSyncAt);
     const asFull = full || this.state.cursor === null || !(this.o.clock.now() - last < FULL_AFTER_MS);
     return this.run(() => this.runCheck(asFull), asFull ? "check:full" : "check");
   }
 
   /** Every operation goes through the queue; failures end it without losing work. */
-  private run(job: () => Promise<void>, key?: string): Promise<void> {
+  /** `job` returns false when it skipped its work: that says nothing about the server being reachable. */
+  private run(job: () => Promise<void | false>, key?: string): Promise<void> {
     const p = this.queue.push(async () => {
       if (this.stopped) return;
       this.emit();
       try {
-        await job();
-        this.online();
+        if ((await job()) !== false) this.online();
       } catch (e) {
         this.failed(e);
       } finally {
@@ -214,6 +220,8 @@ export class SyncEngine {
   private enqueuePath(key: string): Promise<void> {
     return this.run(async () => {
       this.dirty.add(key);
+      // Decided by the first sync, with its choice, once it runs again.
+      if (this.firstSyncChoose !== null) return false;
       // As far as this device knows, the server is at the base; a 409 says otherwise.
       await this.syncPath(key, this.state.bases[key] ?? null, false);
     }, `path:${key}`);
@@ -290,27 +298,42 @@ export class SyncEngine {
   async firstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
     this.state = await this.o.state.load();
     this.stopped = false;
+    this.firstSyncChoose = choose;
+    const outcome = await this.firstSyncJob();
+    if (outcome.error !== null) throw outcome.error;
+    return outcome.summary;
+  }
+
+  /**
+   * One attempt at the first sync. An offline failure schedules another through check(), with the same backoff as
+   * every check, and the choice already made is kept in the state, so a retry never asks again.
+   */
+  private async firstSyncJob(): Promise<{ summary: FirstSyncSummary | null; error: Error | null }> {
     const outcome: { summary: FirstSyncSummary | null; error: Error | null } = { summary: null, error: null };
     await this.queue.push(async () => {
+      const choose = this.firstSyncChoose;
+      if (this.stopped || choose === null) return;
       this.emit();
       try {
         outcome.summary = await this.runFirstSync(choose);
+        if (this.stopped) {
+          // Not a cancelled question: the plugin keeps the connection, and the next start finishes the job.
+          outcome.summary = null;
+          outcome.error = new Error("The first sync was stopped.");
+          return;
+        }
+        this.firstSyncChoose = null;
         this.online();
         if (outcome.summary === null) this.stopped = true;
+        else this.o.onFirstSyncDone?.(outcome.summary);
       } catch (e) {
         outcome.error = e instanceof Error ? e : new Error("The first sync failed.");
-        if (e instanceof AuthError) this.failed(e);
-        else {
-          // No retry on its own: a normal check would turn the pending choice into conflict copies.
-          this.offline = true;
-          this.stopped = true;
-        }
+        this.failed(e);
       } finally {
         this.emit();
       }
     }, "first-sync");
-    if (outcome.error !== null) throw outcome.error;
-    return outcome.summary;
+    return outcome;
   }
 
   private async runFirstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
@@ -323,11 +346,13 @@ export class SyncEngine {
       sides.set(key, { local: text === null ? null : await versionOf(text), remote: remote.get(key) ?? null });
     }
     const plan = makePlan(sides, this.status().notSynced);
-    let choice: Choice = "both";
-    if (plan.differing.length > 0) {
+    let choice: Choice = this.state.pendingChoice ?? "both";
+    if (plan.differing.length > 0 && !this.state.pendingChoice) {
       const chosen = await choose(plan);
       if (chosen === null) return null;
       choice = chosen;
+      this.state.pendingChoice = chosen;
+      await this.save();
     }
 
     const counts = { uploaded: 0, downloaded: 0, unchanged: 0 };
@@ -338,6 +363,8 @@ export class SyncEngine {
     const differing = new Set(plan.differing);
     const damagedPossible = answer.damaged > 0;
     for (const key of keys) {
+      // Stopped (Disconnect, unload): no further writes on either side, and no cursor that says it finished.
+      if (this.stopped) return null;
       const remoteVersion = remote.get(key) ?? null;
       if (upload.has(key)) {
         await this.syncPath(key, null, false);
@@ -357,6 +384,8 @@ export class SyncEngine {
         await this.syncPath(key, remoteVersion, damagedPossible);
       }
     }
+    if (this.stopped) return null;
+    delete this.state.pendingChoice;
     await this.finishCheck(answer);
     return { ...counts, conflictCopies: this.copiesMade - copiesBefore, notSynced: this.status().notSynced };
   }

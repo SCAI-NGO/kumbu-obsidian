@@ -113,3 +113,72 @@ test("keep local with a note the server refuses lists it and finishes", async ()
   expect(summary!.notSynced).toContainEqual({ path: "d.md", reason: "rejected", detail: "Not allowed." });
   expect(h.server.notes.get("e.md")!.content).toBe("e");
 });
+
+test("a first sync that fails offline retries on its own with the same choice", async () => {
+  const h = await harness({ start: false, localOnly: { "d.md": "local" }, remoteOnly: { "d.md": "kumbu" } });
+  const choose = chooser("local");
+  h.server.failNext("put", new OfflineError("lost signal"));
+  await expect(h.engine.firstSync(choose)).rejects.toBeInstanceOf(OfflineError);
+  expect(h.engine.status().mode).toBe("offline");
+  expect(h.state.state.pendingChoice).toBe("local");
+  await vi.advanceTimersByTimeAsync(5000);
+  await h.engine.idle();
+  expect(choose.plans).toHaveLength(1);
+  expect(h.server.notes.get("d.md")!.content).toBe("local");
+  expect(h.engine.status().mode).not.toBe("offline");
+  expect(h.firstSyncsDone).toHaveLength(1);
+  expect(h.state.state.cursor).not.toBeNull();
+  expect(h.state.state.pendingChoice ?? null).toBeNull();
+});
+
+test("a first sync that fails before its question asks it on the retry", async () => {
+  const h = await harness({ start: false, localOnly: { "d.md": "local" }, remoteOnly: { "d.md": "kumbu" } });
+  const choose = chooser("kumbu");
+  h.server.failNext("versions", new OfflineError("no network"));
+  await expect(h.engine.firstSync(choose)).rejects.toBeInstanceOf(OfflineError);
+  expect(choose.plans).toHaveLength(0);
+  await h.engine.check(false);
+  expect(choose.plans).toHaveLength(1);
+  expect(h.files.files.get("d.md")).toBe("kumbu");
+  expect(h.firstSyncsDone).toHaveLength(1);
+});
+
+test("the stored choice survives a restart: the question is not asked twice", async () => {
+  const h = await harness({ start: false, localOnly: { "d.md": "local" }, remoteOnly: { "d.md": "kumbu" } });
+  h.server.failNext("put", new OfflineError("lost signal"));
+  await expect(h.engine.firstSync(chooser("local"))).rejects.toBeInstanceOf(OfflineError);
+  await h.engine.stop();
+  const never = (): Promise<null> => { throw new Error("asked again"); };
+  const summary = await h.engine.firstSync(never);
+  expect(summary).toMatchObject({ uploaded: 1, conflictCopies: 0 });
+  expect(h.server.notes.get("d.md")!.content).toBe("local");
+});
+
+test("local edits wait for an unfinished first sync and then follow its choice", async () => {
+  const h = await harness({ start: false, localOnly: { "d.md": "local" }, remoteOnly: { "d.md": "kumbu" } });
+  h.server.failNext("put", new OfflineError("lost signal"));
+  await expect(h.engine.firstSync(chooser("local"))).rejects.toBeInstanceOf(OfflineError);
+  h.server.calls.length = 0;
+  h.files.userEdit("d.md", "local, edited");
+  h.engine.localChanged("d.md");
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(h.server.count("put")).toBe(0);
+  await vi.advanceTimersByTimeAsync(3000);
+  await h.engine.idle();
+  expect(h.server.notes.get("d.md")!.content).toBe("local, edited");
+  expect([...h.files.files.keys()].filter((p) => p.includes("(conflict "))).toEqual([]);
+});
+
+test("a first sync stopped half way stops writing and saves no cursor", async () => {
+  const h = await harness({ start: false, localOnly: { "a.md": "a", "b.md": "b", "c.md": "c" } });
+  const realPut = h.server.put.bind(h.server);
+  let n = 0;
+  h.server.put = async (...args) => {
+    if (++n === 1) void h.engine.stop();
+    return realPut(...args);
+  };
+  await expect(h.engine.firstSync(chooser("both"))).rejects.toThrow("stopped");
+  expect(h.state.state.cursor).toBeNull();
+  expect(n).toBe(1);
+  expect(h.firstSyncsDone).toEqual([]);
+});
