@@ -16,12 +16,11 @@ import { normaliseText } from "../src/engine/version";
 import { HintConnection, wsUrlFor } from "../src/live/hints";
 import { openSocket } from "../src/obsidian/runtime";
 import { NodeFiles } from "./nodeFiles";
+import { lostMarkers, unexplainedCopies, type Copy, type Landed, type Op } from "./rules";
 
 const DEVICE = "E2E-node";
 /** How long before a user operation an agent write may land and still meet it as a conflict (hint and download time). */
 const BEFORE_MS = 1500;
-/** The 2 s debounce plus round trips: an agent write landing this long after a user edit may still meet it. */
-const AFTER_MS = 3000;
 
 function required(name: string): string {
   const value = process.env[name];
@@ -36,10 +35,34 @@ const server = required("KUMBU_URL");
 const vault = required("KUMBU_VAULT");
 const deviceKey = required("KUMBU_DEVICE_KEY");
 const agentKey = required("KUMBU_AGENT_KEY");
-const seed = Number(process.env.E2E_SEED ?? Date.now() % 1_000_000);
-const seconds = Number(process.env.E2E_SECONDS ?? 180);
-const quietSeconds = Number(process.env.E2E_QUIET_SECONDS ?? 15);
+function whole(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    console.error(`${name} must be a whole number of 0 or more, not "${raw}".`);
+    process.exit(2);
+  }
+  return value;
+}
+
+const seed = whole("E2E_SEED", Date.now() % 1_000_000);
+const seconds = whole("E2E_SECONDS", 180);
+const quietSeconds = whole("E2E_QUIET_SECONDS", 15);
 const clean = process.env.E2E_CLEAN === "1";
+/**
+ * Deliberate bugs, comma-separated, to show that the checks fail: "lww" makes the device overwrite the server's
+ * text on a 409 (last writer wins: an agent's edit is lost silently, both sides still agree); "drop-hints" ignores
+ * every hint, so only the final full check brings the agent's changes over. With hints the engine mostly sees an
+ * agent's edit before it uploads, so "lww" bites rarely alone; "lww,drop-hints" makes most uploads meet a 409.
+ */
+const faults = new Set((process.env.E2E_FAULT ?? "").split(",").filter((f) => f !== ""));
+for (const f of faults) {
+  if (f !== "lww" && f !== "drop-hints") {
+    console.error(`E2E_FAULT takes "lww" and "drop-hints", not "${f}".`);
+    process.exit(2);
+  }
+}
 
 /** mulberry32: a small seeded PRNG, so a run's operations can be told again from its seed. */
 function prng(s: number): () => number {
@@ -79,11 +102,15 @@ class MemoryState implements StateStore {
   save(state: SyncState): Promise<void> { this.state = structuredClone(state); return Promise.resolve(); }
 }
 
-interface Op { t: number; side: "user" | "agent"; kind: string; paths: string[]; }
 const ops: Op[] = [];
 /** When the device's own writes reached the server, per path. */
-const deviceWrites: { t: number; path: string }[] = [];
-const conflicts: { t: number; original: string; copy: string }[] = [];
+const deviceWrites: Landed[] = [];
+const conflicts: Copy[] = [];
+/** The marker line each edit appended (only the agent's edits the server took). */
+const markers: string[] = [];
+const markerPath = new Map<string, string>();
+/** The text each delete removed on purpose; markers in it may be gone. */
+const removed: string[] = [];
 const isCopy = (p: string) => p.includes("(conflict ");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -93,7 +120,12 @@ function recording(api: KumbuApi): RemoteApi {
   return {
     versions: (since, state) => api.versions(since, state),
     read: (path) => api.read(path),
-    put: async (path, content, base) => { const r = await api.put(path, content, base); note(path); return r; },
+    put: async (path, content, base) => {
+      let r = await api.put(path, content, base);
+      if (faults.has("lww") && !r.ok) r = await api.put(path, content, r.conflict.version);
+      note(path);
+      return r;
+    },
     remove: async (path, base) => { const r = await api.remove(path, base); note(path); return r; },
     move: async (from, to) => { const r = await api.move(from, to); note(from, to); return r; },
   };
@@ -122,6 +154,13 @@ async function compare(files: NodeFiles, agent: KumbuApi): Promise<{ diff: strin
   }
   for (const p of remote.keys()) if (!localPaths.includes(p)) diff.push(`only in Kumbu²: ${p}`);
   return { diff, remote, localPaths };
+}
+
+/** Markers in no note, conflict copy or `.trash` file (local, or in Kumbu²) and in no deleted text. */
+async function lost(files: NodeFiles, remote: Map<string, string>): Promise<string[]> {
+  const surviving = [...remote.values()];
+  for (const p of await files.list()) surviving.push(files.textOf(p) ?? "");
+  return lostMarkers(markers, removed, surviving);
 }
 
 async function main(): Promise<number> {
@@ -153,7 +192,7 @@ async function main(): Promise<number> {
     const r = await agent.put(names[i]!, text, null);
     if (!r.ok) throw new Error(`Seeding ${names[i]} failed.`);
   }
-  console.log(`seed ${seed}, folder ${root}, ${seconds} s of operations`);
+  console.log(`seed ${seed}, folder ${root}, ${seconds} s of operations${faults.size === 0 ? "" : `, FAULT ${[...faults].join(",")}`}`);
 
   let authLost = false;
   const state = new MemoryState();
@@ -169,7 +208,7 @@ async function main(): Promise<number> {
     wsUrl: (ticket) => wsUrlFor(server, ticket),
     open: openSocket,
     vault, clock, random: Math.random,
-    check: (full) => void engine.check(full),
+    check: (full) => { if (full || !faults.has("drop-hints")) void engine.check(full); },
     onMode: (m) => { mode = m; engine.setConnectionMode(m); },
   });
   hints.start();
@@ -196,13 +235,16 @@ async function main(): Promise<number> {
       const p = pick(pool)!;
       files.write(p, `${files.textOf(p) ?? `# ${p}\n`}user ${n}\n`);
       engine.localChanged(p);
-      ops.push({ t: Date.now(), side: "user", kind: "edit", paths: [p] });
+      markers.push(`user ${n}`);
+      markerPath.set(`user ${n}`, p);
+      ops.push({ t: Date.now(), side: "user", kind: "edit", paths: [p], ok: true });
     } else if (r < 0.38) {
       const p = pick(local);
       if (p !== undefined) {
+        removed.push(files.textOf(p) ?? "");
         files.remove(p);
         engine.localDeleted(p);
-        ops.push({ t: Date.now(), side: "user", kind: "delete", paths: [p] });
+        ops.push({ t: Date.now(), side: "user", kind: "delete", paths: [p], ok: true });
       }
     } else if (r < 0.45) {
       const from = pick(local);
@@ -210,26 +252,30 @@ async function main(): Promise<number> {
       if (from !== undefined && to !== undefined) {
         await files.rename(from, to);
         engine.localRenamed(from, to);
-        ops.push({ t: Date.now(), side: "user", kind: "rename", paths: [from, to] });
+        ops.push({ t: Date.now(), side: "user", kind: "rename", paths: [from, to], ok: true });
       }
     } else if (r < 0.8) {
       const p = pick(pool)!;
       const current = await agent.read(p);
       let put = await agent.put(p, `${current?.content ?? `# ${p}\n`}agent ${n}\n`, current?.version ?? null);
       if (!put.ok) put = await agent.put(p, `${put.conflict.content}agent ${n}\n`, put.conflict.version);
-      ops.push({ t: Date.now(), side: "agent", kind: put.ok ? "edit" : "edit (409 twice)", paths: [p] });
+      if (put.ok) { markers.push(`agent ${n}`); markerPath.set(`agent ${n}`, p); }
+      ops.push({ t: Date.now(), side: "agent", kind: put.ok ? "edit" : "edit (409 twice)", paths: [p], ok: put.ok });
     } else {
       const remote = (await agent.versions(null, null)).entries.filter((e) => e.version !== null && !isCopy(e.path));
       const e = pick(remote);
       if (e !== undefined && r < 0.9) {
-        const result = await agent.remove(e.path, e.version!);
-        ops.push({ t: Date.now(), side: "agent", kind: result.ok ? "delete" : "delete (refused)", paths: [e.path] });
+        // Read first, so the delete removes exactly the text recorded (it is refused if the note changed since).
+        const note = await agent.read(e.path);
+        const result = note === null ? { ok: false } : await agent.remove(e.path, note.version);
+        if (result.ok) removed.push(note!.content);
+        ops.push({ t: Date.now(), side: "agent", kind: result.ok ? "delete" : "delete (refused)", paths: [e.path], ok: result.ok });
       } else if (e !== undefined) {
         const taken = new Set(remote.map((x) => x.path));
         const to = pick(pool.filter((p) => !taken.has(p)));
         if (to !== undefined) {
           const result = await agent.move(e.path, to);
-          ops.push({ t: Date.now(), side: "agent", kind: result.ok ? "move" : "move (refused)", paths: [e.path, to] });
+          ops.push({ t: Date.now(), side: "agent", kind: result.ok ? "move" : "move (refused)", paths: [e.path, to], ok: result.ok });
         }
       }
     }
@@ -239,48 +285,51 @@ async function main(): Promise<number> {
   console.log(`${ops.length} operations; quiet for ${quietSeconds} s, then a full check`);
   await sleep(quietSeconds * 1000);
   await engine.idle();
-  const before = (await compare(files, agent)).diff;
-  console.log(`before the full check (hints and since answers only): ${before.length === 0 ? "converged" : `${before.length} paths differ: ${before.join(", ")}`}`);
+  // Phase 1: the live path alone (hints, since answers, uploads). Phase 2: after a forced full check.
+  const live = await compare(files, agent);
+  const liveLost = await lost(files, live.remote);
   await engine.check(true);
   await engine.idle();
   const status = engine.status();
   hints.stop();
   await engine.stop();
-
   const { diff, remote, localPaths } = await compare(files, agent);
+  const finalLost = await lost(files, remote);
 
-  // A conflict copy is expected only where both sides touched the path close together: an agent write landing
-  // from shortly before a user operation until the device's next write of that path reached the server.
-  const unexpected: string[] = [];
-  for (const c of conflicts.slice(firstCopies)) {
-    const met = ops.some((u) => u.side === "user" && u.paths.includes(c.original) && u.t <= c.t && ops.some((a) => {
-      if (a.side !== "agent" || !a.paths.includes(c.original)) return false;
-      const landed = deviceWrites.find((w) => w.path === c.original && w.t >= u.t)?.t ?? u.t;
-      return a.t >= u.t - BEFORE_MS && a.t <= Math.max(u.t + AFTER_MS, landed + 500);
-    }));
-    if (!met) unexpected.push(c.original);
-  }
+  const unexpected = unexplainedCopies(conflicts.slice(firstCopies), ops, deviceWrites, BEFORE_MS);
   const copiesOnDisk = localPaths.filter(isCopy);
   const strayCopies = copiesOnDisk.filter((p) => !conflicts.some((c) => c.copy === p));
 
   const kinds = new Map<string, number>();
   for (const o of ops) kinds.set(`${o.side} ${o.kind}`, (kinds.get(`${o.side} ${o.kind}`) ?? 0) + 1);
+  const phase = (d: string[], l: string[]) => d.length === 0 && l.length === 0 ? "converged, nothing lost" : `${d.length} paths differ, ${l.length} edits lost`;
   console.log(`operations: ${[...kinds].sort().map(([k, v]) => `${k} ${v}`).join(", ")}`);
+  console.log(`edits: ${markers.length} markers written, ${removed.length} deletes recorded`);
   console.log(`conflict copies: ${firstCopies} from the first sync, ${conflicts.length - firstCopies} during the run, ${copiesOnDisk.length} on disk`);
   console.log(`status: ${status.mode}; not synced: ${status.notSynced.map((s) => `${s.path} (${s.reason})`).join(", ") || "none"}`);
   console.log(`notes: ${localPaths.length} local, ${remote.size} in Kumbu²`);
+  console.log(`phase 1, before the full check (live path only): ${phase(live.diff, liveLost)}`);
+  console.log(`phase 2, after the full check: ${phase(diff, finalLost)}`);
 
-  const ok = firstOk && diff.length === 0 && unexpected.length === 0 && strayCopies.length === 0 && !authLost && status.mode !== "offline";
-  if (diff.length > 0) console.error(`not converged:\n  ${diff.join("\n  ")}`);
+  const ok = firstOk && live.diff.length === 0 && liveLost.length === 0 && diff.length === 0 && finalLost.length === 0
+    && unexpected.length === 0 && strayCopies.length === 0 && !authLost && status.mode !== "offline";
+  if (live.diff.length > 0) console.error(`not converged before the full check:\n  ${live.diff.join("\n  ")}`);
+  if (diff.length > 0) console.error(`not converged after the full check:\n  ${diff.join("\n  ")}`);
+  const lostAll = [...new Set([...liveLost, ...finalLost])];
+  if (lostAll.length > 0) {
+    console.error(`${lostAll.length} edits lost (in no note, copy or trash, and not deleted):`);
+    for (const m of lostAll.slice(0, 20)) console.error(`  ${m} (written to ${markerPath.get(m) ?? "?"})`);
+  }
   for (const p of unexpected) {
     console.error(`unexpected conflict copy for ${p}; operations on it:`);
-    for (const o of ops.filter((x) => x.paths.includes(p))) console.error(`  ${new Date(o.t).toISOString()} ${o.side} ${o.kind} ${o.paths.join(" → ")}`);
+    for (const o of ops.filter((x) => x.paths.includes(p))) console.error(`  ${new Date(o.t).toISOString()} ${o.side} ${o.kind}${o.ok ? "" : " (no effect)"} ${o.paths.join(" → ")}`);
     for (const w of deviceWrites.filter((x) => x.path === p)) console.error(`  ${new Date(w.t).toISOString()} device write landed`);
+    for (const c of conflicts.filter((x) => x.original === p)) console.error(`  ${new Date(c.t).toISOString()} copy made`);
   }
   if (strayCopies.length > 0) console.error(`conflict copies nobody reported: ${strayCopies.join(", ")}`);
   if (authLost) console.error("the device key stopped working");
   if (status.mode === "offline") console.error("the engine ended offline");
-  if (ok) console.log(`converged: ${unexpected.length} unexpected conflict copies`);
+  if (ok) console.log(`converged: ${unexpected.length} unexpected conflict copies, 0 edits lost`);
   return ok ? 0 : 1;
 }
 

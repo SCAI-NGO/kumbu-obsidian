@@ -16,11 +16,16 @@ export class NodeFiles implements LocalFiles {
     return join(this.root, ...path.split("/"));
   }
 
-  /** The user's side: writes a note as an editor would save it. */
+  /**
+   * The user's side: writes a note as an editor would save it. Through a temp file and a rename, so the engine's
+   * asynchronous read never sees a half-written file (Obsidian's adapter has no such gap either).
+   */
   write(path: string, content: string): void {
     const file = this.abs(path);
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, content, "utf8");
+    const temp = join(dirname(file), `.kumbu-e2e-${process.pid}.tmp`);
+    writeFileSync(temp, content, "utf8");
+    renameSync(temp, file);
   }
 
   exists(path: string): boolean {
