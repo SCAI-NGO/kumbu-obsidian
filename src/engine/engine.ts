@@ -279,16 +279,15 @@ export class SyncEngine {
   async firstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
     this.state = await this.o.state.load();
     this.stopped = false;
-    let summary: FirstSyncSummary | null = null;
-    let error: unknown = null;
+    const outcome: { summary: FirstSyncSummary | null; error: Error | null } = { summary: null, error: null };
     await this.queue.push(async () => {
       this.emit();
       try {
-        summary = await this.runFirstSync(choose);
+        outcome.summary = await this.runFirstSync(choose);
         this.online();
-        if (summary === null) this.stopped = true;
+        if (outcome.summary === null) this.stopped = true;
       } catch (e) {
-        error = e;
+        outcome.error = e instanceof Error ? e : new Error("The first sync failed.");
         if (e instanceof AuthError) this.failed(e);
         else {
           // No retry on its own: a normal check would turn the pending choice into conflict copies.
@@ -299,8 +298,8 @@ export class SyncEngine {
         this.emit();
       }
     }, "first-sync");
-    if (error !== null) throw error;
-    return summary;
+    if (outcome.error !== null) throw outcome.error;
+    return outcome.summary;
   }
 
   private async runFirstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
