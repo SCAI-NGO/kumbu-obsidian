@@ -5,6 +5,8 @@ import { versionOf } from "../../src/engine/version";
 
 export class FakeFiles implements LocalFiles {
   readonly files = new Map<string, string>();
+  /** Open editors with text not saved yet (as Obsidian holds it for about 2 s), by stored path. */
+  readonly editors = new Map<string, string>();
   readonly trash: string[] = [];
   readonly systemTrash: string[] = [];
   caseInsensitive = false;
@@ -18,6 +20,11 @@ export class FakeFiles implements LocalFiles {
 
   userEdit(path: string, content: string): void {
     this.files.set(this.existing(path) ?? path, content);
+  }
+
+  /** Typing that is only in an open editor: no file change, no event yet. */
+  userTypes(path: string, content: string): void {
+    this.editors.set(this.existing(path) ?? path, content);
   }
 
   userDelete(path: string): void {
@@ -39,7 +46,7 @@ export class FakeFiles implements LocalFiles {
 
   read(path: string): Promise<string | null> {
     const p = this.existing(path);
-    return Promise.resolve(p === undefined ? null : this.files.get(p)!);
+    return Promise.resolve(p === undefined ? null : (this.editors.get(p) ?? this.files.get(p)!));
   }
 
   size(path: string): Promise<number | null> {
@@ -49,11 +56,12 @@ export class FakeFiles implements LocalFiles {
 
   async writeIf(path: string, expected: Version | null, content: string): Promise<boolean> {
     const p = this.existing(path);
-    const now = p === undefined ? null : await versionOf(this.files.get(p)!);
+    const now = p === undefined ? null : await versionOf(this.editors.get(p) ?? this.files.get(p)!);
     if (now !== expected) return false;
     this.beforeWrite?.(path);
     this.writes++;
     this.files.set(p ?? path, content);
+    if (p !== undefined && this.editors.has(p)) this.editors.set(p, content);
     return true;
   }
 

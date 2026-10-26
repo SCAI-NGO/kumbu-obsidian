@@ -77,6 +77,18 @@ test("an agent edit and a user edit of different notes at the same time", async 
   expect(h.files.files.get("b.md")).toBe("agent b");
 });
 
+test("an agent edit while the user's typing is only in the editor: a conflict copy, never an overwrite", async () => {
+  // The demo's step 3: Chris types in Car.md, Claude moves the appointment, the hint comes before Obsidian saves.
+  const h = await harness({ synced: { "Car.md": "Car at 14:00" } });
+  h.files.userTypes("Car.md", "Car at 14:00, bring the papers");
+  await h.server.agentWrite("Car.md", "Car at 16:00");
+  await h.engine.check(false);
+  expect(h.files.files.get("Car.md")).toBe("Car at 16:00");
+  const copy = [...h.files.files.keys()].find(isCopy)!;
+  expect(h.files.files.get(copy)).toContain("bring the papers");
+  expect(h.server.notes.get(copy)!.content).toContain("bring the papers");
+});
+
 test("an agent edit of the note the user is typing in", async () => {
   const h = await harness({ synced: { "a.md": "one" } });
   user(h).edit("a.md", "typing");

@@ -32,9 +32,13 @@ export interface LocalFiles {
   /** True where "Plan.md" and "plan.md" are one file (macOS, Windows, Android, iOS). */
   readonly caseInsensitive: boolean;
   list(): Promise<string[]>; // vault-relative paths of all files, any extension
+  /** The text the user sees: an open editor's unsaved text if there is one, else the file's. */
   read(path: string): Promise<string | null>;
   size(path: string): Promise<number | null>; // bytes on disk
-  /** Writes only if the current text still has version `expected` (null: file must not exist). Returns false if it changed. */
+  /**
+   * Writes only if the text the user sees (as `read` gives it, so unsaved typing in an editor counts) still has
+   * version `expected` (null: the file must not exist). Returns false if it changed.
+   */
   writeIf(path: string, expected: Version | null, content: string): Promise<boolean>;
   trashToLocal(path: string): Promise<void>; // Obsidian's .trash, always (first-sync "Keep Kumbu²")
   trashByPreference(path: string): Promise<void>; // the user's trash setting (remote deletions)
