@@ -24,7 +24,7 @@ export default defineConfig([
   {
     rules: {
       // The product's names keep their casing in the middle of a sentence, like "Obsidian Sync".
-      "obsidianmd/ui/sentence-case": ["warn", { brands: [...DEFAULT_BRANDS, "Kumbu²", "Kumbu² Sync"] }],
+      "obsidianmd/ui/sentence-case": ["warn", { brands: [...DEFAULT_BRANDS, "Kumbu²", "Kumbu² Sync", "Connect Obsidian", "K7QM-4XDA"] }],
     },
   },
   {
@@ -32,6 +32,12 @@ export default defineConfig([
     // setting; only this adapter calls Vault.trash, for that one case (VaultFiles.trashToLocal).
     files: ["src/obsidian/vaultFiles.ts"],
     rules: { "obsidianmd/prefer-file-manager-trash-file": "off" },
+  },
+  {
+    // minAppVersion is 1.11.4: display() and setWarning() are what that version has; their 1.13 successors
+    // (getSettingDefinitions, setDestructive) would not run there.
+    files: ["src/obsidian/settingsTab.ts", "src/obsidian/modals.ts"],
+    rules: { "@typescript-eslint/no-deprecated": "off", "obsidianmd/settings-tab/prefer-setting-definitions": "off" },
   },
   {
     files: ["src/engine/**", "src/api/**", "src/live/**"],

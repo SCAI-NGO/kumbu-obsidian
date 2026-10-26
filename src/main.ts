@@ -1,26 +1,41 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The plugin: settings and state in data.json, the engine and the hints wired to the vault's events.
-import { Notice, Plugin, TAbstractFile, TFile } from "obsidian";
-import { KumbuApi } from "./api/client";
+import { Notice, Platform, Plugin, TAbstractFile, TFile } from "obsidian";
+import { KumbuApi, redeemPairing, trimServer } from "./api/client";
 import { SyncEngine } from "./engine/engine";
-import type { SyncState, SyncStatus } from "./engine/ports";
+import { defaultDeviceName, secretId } from "./engine/paths";
+import { AuthError, OfflineError, type SyncState, type SyncStatus } from "./engine/ports";
 import { HintConnection, wsUrlFor } from "./live/hints";
 import { obsidianHttp } from "./obsidian/http";
+import { ConfirmModal, ConflictChoiceModal, ResultModal } from "./obsidian/modals";
 import { openSocket, windowClock } from "./obsidian/runtime";
-import { readKey, secretsAvailable } from "./obsidian/secret";
+import { forgetKey, readKey, secretsAvailable, storeKey } from "./obsidian/secret";
+import { KumbuSettingTab } from "./obsidian/settingsTab";
+import { StatusBar } from "./obsidian/statusBar";
 import { VaultFiles } from "./obsidian/vaultFiles";
 
-export interface Settings { server: string; vault: string; device: string; secretId: string; }
+/** `ownsSecret`: the secret was stored by pairing (and is forgotten on disconnect), not picked by the user. */
+export interface Settings { server: string; vault: string; device: string; secretId: string; ownsSecret: boolean; }
 export interface PluginData { settings: Settings; state: SyncState; }
 
 export const emptyState = (): SyncState => ({ bases: {}, cursor: null, lastFullAt: null, lastSyncAt: null });
-const emptySettings = (): Settings => ({ server: "", vault: "", device: "", secretId: "" });
+const emptySettings = (): Settings => ({ server: "", vault: "", device: "", secretId: "", ownsSecret: false });
+
+function platformName(): string {
+  if (Platform.isAndroidApp) return "Android";
+  if (Platform.isIosApp) return "iOS";
+  if (Platform.isMacOS) return "Mac";
+  if (Platform.isWin) return "Windows";
+  return "Linux";
+}
 
 export default class KumbuSyncPlugin extends Plugin {
   data: PluginData = { settings: emptySettings(), state: emptyState() };
   engine: SyncEngine | null = null;
   api: KumbuApi | null = null;
   private hints: HintConnection | null = null;
+  private statusBar: StatusBar | null = null;
+  private tab: KumbuSettingTab | null = null;
 
   override async onload(): Promise<void> {
     this.data = normalise(await this.loadData());
@@ -28,8 +43,12 @@ export default class KumbuSyncPlugin extends Plugin {
       new Notice("Kumbu² Sync needs Obsidian 1.11.4 or newer.");
       return;
     }
+    if (!this.data.settings.device) this.data.settings.device = defaultDeviceName(platformName(), Math.random);
 
-    this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.engine?.check(false) });
+    this.tab = new KumbuSettingTab(this.app, this);
+    this.addSettingTab(this.tab);
+    this.statusBar = new StatusBar(this.addStatusBarItem(), () => this.openSettings());
+    this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.syncNow() });
     this.registerEvent(this.app.vault.on("create", (f) => this.ifFile(f, (p) => this.engine?.localChanged(p))));
     this.registerEvent(this.app.vault.on("modify", (f) => this.ifFile(f, (p) => this.engine?.localChanged(p))));
     this.registerEvent(this.app.vault.on("delete", (f) => this.ifFile(f, (p) => this.engine?.localDeleted(p))));
@@ -50,16 +69,126 @@ export default class KumbuSyncPlugin extends Plugin {
     return s.server !== "" && s.vault !== "" && s.device !== "" && readKey(this.app, s.secretId) !== null;
   }
 
-  /** Builds the engine and the hints for the connected vault and starts them; nothing when not connected. */
+  /**
+   * Builds the engine and the hints for the connected vault and starts them; nothing when not connected.
+   * A vault whose first sync never finished (no cursor yet) runs the first sync again, with its question.
+   */
   async startSync(): Promise<void> {
     await this.stopSync();
     const s = this.data.settings;
     const key = readKey(this.app, s.secretId);
-    if (!s.server || !s.vault || !s.device || key === null) return;
+    if (!s.server || !s.vault || !s.device || key === null) {
+      this.statusBar?.hide();
+      return;
+    }
     const api = new KumbuApi(obsidianHttp, s.server, s.vault, key);
     const engine = this.buildEngine(api);
     this.api = api;
     this.engine = engine;
+    if (this.data.state.cursor === null) {
+      await this.firstSync(engine);
+      return;
+    }
+    await engine.start();
+    this.startHints(api, engine);
+  }
+
+  async syncNow(): Promise<void> {
+    if (!this.engine) await this.startSync();
+    else if (this.data.state.cursor === null) await this.startSync();
+    else await this.engine.check(false);
+  }
+
+  /** Pairing: the code becomes a device key in SecretStorage, then the first sync runs. */
+  async connectWithPairing(code: string): Promise<void> {
+    const s = this.data.settings;
+    let paired;
+    try {
+      paired = await redeemPairing(obsidianHttp, s.server, code, s.device);
+    } catch (e) {
+      new Notice(e instanceof Error ? e.message : "The server can't be reached.");
+      return;
+    }
+    const id = secretId(paired.vault, s.device);
+    storeKey(this.app, id, paired.key);
+    await this.connectTo(paired.vault, id, true);
+  }
+
+  /** The fallback: a key the user made by hand and keeps in SecretStorage themself. */
+  async connectWithKey(id: string, vault: string): Promise<void> {
+    await this.connectTo(vault, id, false);
+  }
+
+  async listVaults(id: string): Promise<{ name: string; canWrite: boolean }[]> {
+    const key = readKey(this.app, id);
+    if (key === null) throw new Error("This secret is empty.");
+    return new KumbuApi(obsidianHttp, this.data.settings.server, "", key).vaults();
+  }
+
+  async disconnect(): Promise<void> {
+    const ok = await new ConfirmModal(this.app, "Disconnect", "This stops syncing. Your files stay as they are.", "Disconnect").ask();
+    if (!ok) return;
+    await this.forgetConnection();
+  }
+
+  async saveAll(): Promise<void> {
+    await this.saveData(this.data);
+  }
+
+  private async connectTo(vault: string, id: string, ownsSecret: boolean): Promise<void> {
+    await this.stopSync();
+    const s = this.data.settings;
+    s.server = trimServer(s.server);
+    s.vault = vault;
+    s.secretId = id;
+    s.ownsSecret = ownsSecret;
+    this.data.state = emptyState();
+    await this.saveAll();
+    await this.startSync();
+  }
+
+  private async firstSync(engine: SyncEngine): Promise<void> {
+    const s = this.data.settings;
+    let summary;
+    try {
+      summary = await engine.firstSync((plan) => new ConflictChoiceModal(this.app, plan, s.vault, s.device).choose());
+    } catch (e) {
+      if (e instanceof AuthError) return;
+      const why = e instanceof OfflineError ? e.message : "an unexpected error";
+      new Notice(`Kumbu² Sync: the first sync stopped (${why}). It goes on with "Sync now" or the next start.`);
+      return;
+    }
+    if (summary === null) {
+      // Cancelled: not connected, nothing kept but the server and the device name.
+      await this.forgetConnection();
+      return;
+    }
+    new ResultModal(this.app, s.vault, summary).open();
+    if (this.api && this.engine === engine) this.startHints(this.api, engine);
+  }
+
+  private async forgetConnection(): Promise<void> {
+    await this.stopSync();
+    const s = this.data.settings;
+    if (s.ownsSecret) forgetKey(this.app, s.secretId);
+    s.vault = "";
+    s.secretId = "";
+    s.ownsSecret = false;
+    this.data.state = emptyState();
+    await this.saveAll();
+    this.statusBar?.hide();
+    this.tab?.refresh();
+  }
+
+  private openSettings(): void {
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    setting?.open();
+    setting?.openTabById(this.manifest.id);
+  }
+
+  private startHints(api: KumbuApi, engine: SyncEngine): void {
+    const s = this.data.settings;
+    this.hints?.stop();
     this.hints = new HintConnection({
       ticket: () => api.wsTicket(),
       wsUrl: (ticket) => wsUrlFor(s.server, ticket),
@@ -70,8 +199,7 @@ export default class KumbuSyncPlugin extends Plugin {
       check: (full) => void engine.check(full),
       onMode: (mode) => engine.setConnectionMode(mode),
     });
-    await engine.start();
-    this.hints?.start();
+    this.hints.start();
   }
 
   async stopSync(): Promise<void> {
@@ -105,12 +233,14 @@ export default class KumbuSyncPlugin extends Plugin {
     });
   }
 
-  /** Task 10 shows this in the status bar and the settings. */
-  protected statusChanged(_status: SyncStatus): void {}
+  private statusChanged(status: SyncStatus): void {
+    this.statusBar?.update(status);
+    if (!status.busy) this.tab?.refresh();
+  }
 
-  protected authLost(): void {
+  private authLost(): void {
     new Notice("Kumbu² Sync: this key expired or was revoked. Pair again in the settings.");
-    void this.stopSync();
+    void this.forgetConnection();
   }
 
   private ifFile(file: TAbstractFile, then: (path: string) => void): void {
