@@ -119,7 +119,11 @@ export class KumbuApi implements RemoteApi {
 export async function redeemPairing(http: HttpFn, server: string, code: string, device: string): Promise<RedeemView> {
   const body: RedeemRequest = { code: normalisePairingCode(code), device: device.trim() };
   const r = await call(http, { method: "POST", url: `${trimServer(server)}/api/pairing/redeem`, headers: {} }, body);
-  if (r.status === 404 || r.status === 400 || r.status === 429) throw new RejectedError(errorOf(r) ?? WRONG_CODE);
+  if (r.status === 409) {
+    // Every "<Vault> – Obsidian <device>" name up to " 20" is taken, and the code is used up.
+    throw new RejectedError(`${errorOf(r) ?? "That key name is taken."} Change the device name and make a new code in the web app.`, 409);
+  }
+  if (r.status === 404 || r.status === 400 || r.status === 429) throw new RejectedError(errorOf(r) ?? WRONG_CODE, r.status);
   expectOk(r);
   return parse<RedeemView>(r);
 }

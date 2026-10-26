@@ -56,8 +56,9 @@ export class KumbuSettingTab extends PluginSettingTab {
         new Notice("Enter the pairing code from the web app.");
         return;
       }
-      await this.whileBusy(b.buttonEl, () => this.plugin.connectWithPairing(this.code));
-      this.code = "";
+      let paired = false;
+      await this.whileBusy(b.buttonEl, async () => { paired = await this.plugin.connectWithPairing(this.code); });
+      if (paired) this.code = "";
       this.display();
     }));
 

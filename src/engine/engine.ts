@@ -27,6 +27,8 @@ const RETRY_FIRST_MS = 5000;
 const RETRY_MAX_MS = 5 * 60_000;
 /** A path decided again more often than this in one go is left for the next trigger. */
 const MAX_ROUNDS = 4;
+/** Marks a path listed for an unexpected error: never equal to a version, so it is tried again every time. */
+const UNEXPECTED = "!";
 const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.md$/;
 
 /** What an operation found out: decide again with this remote version. */
@@ -231,15 +233,24 @@ export class SyncEngine {
     const answer = await this.o.remote.versions(full ? null : this.state.cursor, null);
     const { remote, keys } = await this.resolve(answer);
     const damagedPossible = answer.full && answer.damaged > 0;
+    let pathFailed = false;
     for (const key of keys) {
       if (this.stopped) return;
       const base = this.state.bases[key] ?? null;
       const known = answer.full ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : base;
       // Still being typed in: its debounce uploads it (spec §6, rule 6), unless the server has news for it.
       if (this.debounces.has(key) && known === base) continue;
-      await this.syncPath(key, known, damagedPossible);
+      try {
+        await this.syncPath(key, known, damagedPossible);
+      } catch (e) {
+        if (e instanceof OfflineError || e instanceof AuthError) throw e;
+        // One path's local trouble doesn't hold up the others; it is listed and tried again by every check.
+        this.rejected.set(key, { version: UNEXPECTED, detail: `Couldn't sync: ${e instanceof Error ? e.message : "unknown error"}` });
+        pathFailed = true;
+      }
     }
-    await this.finishCheck(answer);
+    // The old cursor stays while a path failed, so the next check asks for it again.
+    if (!pathFailed) await this.finishCheck(answer);
   }
 
   private async finishCheck(answer: VersionsAnswer): Promise<void> {
@@ -469,7 +480,7 @@ export class SyncEngine {
         this.dirty.delete(key);
         return;
       }
-      if (outgoing) this.rejected.delete(key);
+      if (outgoing || this.rejected.get(key)?.version === UNEXPECTED) this.rejected.delete(key);
       if (again === undefined) {
         this.dirty.delete(key);
         return;
@@ -550,9 +561,10 @@ export class SyncEngine {
     if (note === null) return { remote: null };
     if (note.version !== remote) return { remote: note.version };
     const at = new Date(this.o.clock.now());
-    const copyText = conflictCopyText(text, {
+    const textOf = (local: string) => conflictCopyText(local, {
       device: this.o.device, localAt: at, remoteWriter: note.lastWriter, remoteAt: new Date(note.lastWriteAt), originalPath: key,
     });
+    let copyText = textOf(text);
     const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, at));
     if (!(await this.o.local.writeIf(copy, null, copyText))) return { remote };
     // The copy is safe on disk before the original is overwritten, so a failure from here on loses nothing.
@@ -562,7 +574,16 @@ export class SyncEngine {
     this.dirty.add(copyKey);
     this.copiesMade++;
     this.o.onConflict(key, copyKey);
-    const replaced = await this.o.local.writeIf(path, local, note.content);
+    let replaced = await this.o.local.writeIf(path, local, note.content);
+    // Typed on meanwhile: the newer text goes into the same copy, rather than a second copy for one conflict.
+    for (let round = 0; !replaced && round < MAX_ROUNDS; round++) {
+      const now = await this.o.local.read(path);
+      if (now === null) break;
+      const next = textOf(now);
+      if (!(await this.o.local.writeIf(copy, await versionOf(copyText), next))) break;
+      copyText = next;
+      replaced = await this.o.local.writeIf(path, await versionOf(now), note.content);
+    }
     if (replaced) await this.setBase(key, note.version);
     // Uploaded whatever happened to the original: it is a note of its own now.
     await this.syncPath(copyKey, null, false);

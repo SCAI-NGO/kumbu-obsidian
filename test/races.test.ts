@@ -246,3 +246,22 @@ test("the original deleted while its conflict copy is written: the copy still re
   await quiet(h);
   expectConverged(h.server, h.files, 1);
 });
+
+test("typing between writing the conflict copy and replacing the original updates that copy, not a second one", async () => {
+  const h = await harness({ synced: { "a.md": "one" } });
+  await h.server.agentWrite("a.md", "agent");
+  h.files.beforeWrite = (path) => {
+    if (isCopy(path)) {
+      h.files.beforeWrite = null;
+      h.files.userEdit("a.md", "mine plus more");
+    }
+  };
+  user(h).edit("a.md", "mine");
+  await settle(h, 2000);
+  await quiet(h);
+  const copies = [...h.files.files.keys()].filter(isCopy);
+  expect(copies).toHaveLength(1);
+  expect(h.files.files.get(copies[0]!)).toContain("mine plus more");
+  expect(h.files.files.get("a.md")).toBe("agent");
+  expectConverged(h.server, h.files, 1);
+});

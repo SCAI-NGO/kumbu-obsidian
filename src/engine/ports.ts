@@ -13,8 +13,10 @@ export type MoveResult = { ok: true; version: Version } | { ok: false };
 
 /** 401: the key expired or was revoked. */
 export class AuthError extends Error {}
-/** 400/413: the server's sentence is the message. */
-export class RejectedError extends Error {}
+/** 400/413 (and pairing's 404/409/429): the server's sentence is the message. */
+export class RejectedError extends Error {
+  constructor(message: string, readonly status: number | null = null) { super(message); }
+}
 /** Network failure, 5xx, 429, timeout. `retryAfterMs` comes from a Retry-After header. */
 export class OfflineError extends Error {
   constructor(message: string, readonly retryAfterMs: number | null = null) { super(message); }

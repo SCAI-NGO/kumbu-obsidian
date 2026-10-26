@@ -320,6 +320,23 @@ describe("review focus", () => {
 });
 
 describe("not synced", () => {
+  test("an unexpected local error on one path is listed and the other paths still sync", async () => {
+    const h = await harness({ synced: { "a.md": "a", "b.md": "b" } });
+    await h.server.agentWrite("a.md", "agent a");
+    await h.server.agentWrite("b.md", "agent b");
+    const writeIf = h.files.writeIf.bind(h.files);
+    let broken = true;
+    h.files.writeIf = (path, expected, content) =>
+      broken && path === "a.md" ? Promise.reject(new Error("A file is in the way.")) : writeIf(path, expected, content);
+    await h.engine.check(false);
+    expect(h.files.files.get("b.md")).toBe("agent b");
+    expect(h.engine.status().notSynced).toContainEqual({ path: "a.md", reason: "rejected", detail: "Couldn't sync: A file is in the way." });
+    broken = false;
+    await h.engine.check(false);
+    expect(h.files.files.get("a.md")).toBe("agent a");
+    expect(h.engine.status().notSynced).toEqual([]);
+  });
+
   test("a file over 1 MiB is not synced and not retried", async () => {
     const h = await harness({ synced: { "a.md": "one" } });
     h.files.userEdit("big.md", "x".repeat(1_048_577));

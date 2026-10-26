@@ -107,24 +107,28 @@ export default class KumbuSyncPlugin extends Plugin {
     else await this.startSync();
   }
 
-  /** Pairing: the code becomes a device key in SecretStorage, then the first sync runs. */
-  async connectWithPairing(code: string): Promise<void> {
+  /**
+   * Pairing: the code becomes a device key in SecretStorage, then the first sync runs. False when the code wasn't
+   * redeemed, so the settings keep it for a retry (the server keeps it valid after a bad device name).
+   */
+  async connectWithPairing(code: string): Promise<boolean> {
     const s = this.data.settings;
     const problem = serverProblem(s.server);
     if (problem !== null) {
       new Notice(problem);
-      return;
+      return false;
     }
     let paired;
     try {
       paired = await redeemPairing(obsidianHttp, s.server, code, s.device);
     } catch (e) {
       new Notice(e instanceof Error ? e.message : "The server can't be reached.");
-      return;
+      return false;
     }
     const id = secretId(paired.vault, s.device, this.app.vault.getName());
     storeKey(this.app, id, paired.key);
     await this.connectTo(paired.vault, id, true);
+    return true;
   }
 
   /** The fallback: a key the user made by hand and keeps in SecretStorage themself. */

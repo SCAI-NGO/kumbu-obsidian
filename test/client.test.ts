@@ -193,6 +193,14 @@ describe("pairing", () => {
   test("a wrong code without a sentence has a default", async () => {
     await expect(redeemPairing(fakeHttp({ status: 404 }), "https://k.example", "x", "L")).rejects.toThrow("This code is not valid (any more).");
   });
+  test("a taken key name says what to do next", async () => {
+    const p = redeemPairing(fakeHttp({ status: 409, body: { error: "You already have an API key or connection named 'Work – Obsidian L 20'." } }), "https://k.example", "x", "L");
+    await expect(p).rejects.toThrow("You already have an API key or connection named 'Work – Obsidian L 20'. Change the device name and make a new code in the web app.");
+    await expect(p).rejects.toMatchObject({ status: 409 });
+  });
+  test("a bad device name keeps its status, so the code can be kept for a retry", async () => {
+    await expect(redeemPairing(fakeHttp({ status: 400, body: { error: "Bad device name." } }), "https://k.example", "x", "L")).rejects.toMatchObject({ status: 400 });
+  });
   test("too many attempts is rejected with the server's sentence", async () => {
     await expect(redeemPairing(fakeHttp({ status: 429, body: { error: "Too many attempts." } }), "https://k.example", "x", "L")).rejects.toThrow("Too many attempts.");
   });
