@@ -1,0 +1,469 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// The sync engine (spec §6): one serial queue per vault, every decision from local, remote and base versions.
+import { conflictCopyText } from "./conflict";
+import { decide, type Action } from "./decide";
+import { conflictCopyPath, eligibility } from "./paths";
+import {
+  AuthError, OfflineError, RejectedError,
+  type Clock, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi, type StateStore,
+  type SyncState, type SyncStatus, type Version,
+} from "./ports";
+import { SerialQueue } from "./queue";
+import { byteSize, MAX_BYTES, versionOf } from "./version";
+
+export interface EngineOptions {
+  vault: string; device: string; local: LocalFiles; remote: RemoteApi; state: StateStore; clock: Clock;
+  onStatus(s: SyncStatus): void;
+  onConflict(original: string, copy: string): void;
+  onAuthLost(): void;
+}
+
+const DEBOUNCE_MS = 2000;
+const FULL_AFTER_MS = 25 * 24 * 3600_000;
+const RETRY_FIRST_MS = 5000;
+const RETRY_MAX_MS = 5 * 60_000;
+/** A path decided again more often than this in one go is left for the next trigger. */
+const MAX_ROUNDS = 4;
+const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.md$/;
+
+/** What an operation found out: decide again with this remote version. */
+interface Again { remote: Version | null; }
+
+/** Paths are compared as NFC, the form the server and other devices use. */
+const keyOf = (path: string) => path.normalize("NFC");
+
+export class SyncEngine {
+  private readonly o: EngineOptions;
+  private readonly queue = new SerialQueue();
+  private state: SyncState = { bases: {}, cursor: null, lastFullAt: null, lastSyncAt: null };
+  private stopped = true;
+  private readonly debounces = new Map<string, unknown>();
+  /** Paths with local work not yet done, retried by every check until it succeeds. */
+  private readonly dirty = new Set<string>();
+  /** Key → the path as the file system spells it (NFD on some, or another case). */
+  private readonly localPathOf = new Map<string, string>();
+  private readonly attachments = new Set<string>();
+  private readonly tooLarge = new Set<string>();
+  private readonly rejected = new Map<string, { version: Version; detail: string }>();
+  private caseClashes = new Map<string, string>();
+  private damaged = 0;
+  private readonly conflicts = new Set<string>();
+  private connection: ConnectionMode = "polling";
+  private offline = false;
+  private retryHandle: unknown = null;
+  private retryDelay = 0;
+
+  constructor(o: EngineOptions) {
+    this.o = o;
+  }
+
+  /** Loads the state and runs a full check. */
+  async start(): Promise<void> {
+    this.state = await this.o.state.load();
+    this.stopped = false;
+    await this.check(true);
+  }
+
+  /** Cancels debounces and waits for the queue. Edits not yet uploaded are found by the next start's full check. */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    for (const h of this.debounces.values()) this.o.clock.clearTimeout(h);
+    this.debounces.clear();
+    this.cancelRetry();
+    await this.queue.idle();
+  }
+
+  idle(): Promise<void> {
+    return this.queue.idle();
+  }
+
+  /** The hint connection's mode; the engine shows "offline" over it while the server can't be reached. */
+  setConnectionMode(mode: ConnectionMode): void {
+    this.connection = mode;
+    this.emit();
+  }
+
+  status(): SyncStatus {
+    const notSynced: NotSynced[] = [];
+    for (const path of [...this.attachments].sort()) notSynced.push({ path, reason: "attachment" });
+    for (const path of [...this.tooLarge].sort()) notSynced.push({ path, reason: "too-large", detail: "Larger than 1 MiB." });
+    for (const [path, r] of [...this.rejected].sort()) notSynced.push({ path, reason: "rejected", detail: r.detail });
+    for (const [path, winner] of [...this.caseClashes].sort()) {
+      notSynced.push({ path, reason: "case-clash", detail: `Differs only in case from ${winner}.` });
+    }
+    if (this.damaged > 0) {
+      notSynced.push({
+        path: "", reason: "damaged-vault",
+        detail: `${this.damaged} ${this.damaged === 1 ? "note" : "notes"} in Kumbu² can't be opened, so no local file is trashed because a note is missing.`,
+      });
+    }
+    return {
+      mode: this.offline ? "offline" : this.connection,
+      notSynced,
+      conflicts: [...this.conflicts].sort(),
+      busy: this.queue.busy,
+      lastSyncAt: this.state.lastSyncAt,
+    };
+  }
+
+  localChanged(path: string): void {
+    if (this.stopped) return;
+    const kind = eligibility(path);
+    if (kind === "ignored") return;
+    if (kind === "attachment") {
+      this.attachments.add(path);
+      this.emit();
+      return;
+    }
+    const key = keyOf(path);
+    this.localPathOf.set(key, path);
+    this.dirty.add(key);
+    this.cancelDebounce(key);
+    this.debounces.set(key, this.o.clock.setTimeout(() => {
+      this.debounces.delete(key);
+      void this.enqueuePath(key);
+    }, DEBOUNCE_MS));
+  }
+
+  localDeleted(path: string): void {
+    if (this.stopped) return;
+    const kind = eligibility(path);
+    if (kind === "attachment") {
+      this.attachments.delete(path);
+      this.emit();
+    }
+    if (kind !== "sync") return;
+    const key = keyOf(path);
+    this.cancelDebounce(key);
+    this.dirty.add(key);
+    void this.enqueuePath(key);
+  }
+
+  localRenamed(from: string, to: string): void {
+    if (this.stopped) return;
+    const fromSync = eligibility(from) === "sync";
+    const toSync = eligibility(to) === "sync";
+    if (!fromSync || !toSync) {
+      // In or out of what syncs (a dot folder, an extension change): a delete and a create.
+      this.localDeleted(from);
+      this.localChanged(to);
+      return;
+    }
+    const fk = keyOf(from);
+    const tk = keyOf(to);
+    this.cancelDebounce(fk);
+    this.cancelDebounce(tk);
+    this.localPathOf.set(tk, to);
+    this.dirty.add(fk);
+    this.dirty.add(tk);
+    void this.run(async () => {
+      const base = this.state.bases[fk];
+      const text = await this.o.local.read(to);
+      const now = text === null ? null : await versionOf(text);
+      if (base !== undefined && now === base && this.state.bases[tk] === undefined) {
+        const moved = await this.o.remote.move(fk, tk);
+        if (moved.ok) {
+          delete this.state.bases[fk];
+          this.state.bases[tk] = moved.version;
+          this.dirty.delete(fk);
+          this.dirty.delete(tk);
+          await this.save();
+          return;
+        }
+      }
+      await this.syncPath(fk, this.state.bases[fk] ?? null, false);
+      await this.syncPath(tk, this.state.bases[tk] ?? null, false);
+    });
+  }
+
+  /** `full`: start, visible again, hourly; otherwise (hint, "Sync now", poll) only what changed since the cursor. */
+  check(full: boolean): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    const last = this.state.lastSyncAt === null ? NaN : Date.parse(this.state.lastSyncAt);
+    const asFull = full || this.state.cursor === null || !(this.o.clock.now() - last < FULL_AFTER_MS);
+    return this.run(() => this.runCheck(asFull), asFull ? "check:full" : "check");
+  }
+
+  /** Every operation goes through the queue; failures end it without losing work. */
+  private run(job: () => Promise<void>, key?: string): Promise<void> {
+    const p = this.queue.push(async () => {
+      if (this.stopped) return;
+      this.emit();
+      try {
+        await job();
+        this.online();
+      } catch (e) {
+        this.failed(e);
+      } finally {
+        this.emit();
+      }
+    }, key);
+    return p;
+  }
+
+  private enqueuePath(key: string): Promise<void> {
+    return this.run(async () => {
+      this.dirty.add(key);
+      // As far as this device knows, the server is at the base; a 409 says otherwise.
+      await this.syncPath(key, this.state.bases[key] ?? null, false);
+    }, `path:${key}`);
+  }
+
+  private async runCheck(full: boolean): Promise<void> {
+    const answer = await this.o.remote.versions(full ? null : this.state.cursor, null);
+    const isFull = answer.full;
+    const caseInsensitive = this.o.local.caseInsensitive;
+    const fold = (k: string) => (caseInsensitive ? k.toLowerCase() : k);
+
+    const localKeys = await this.scanLocal(isFull);
+
+    // Which spelling owns a case-folded path: synced paths first, then the answer in path order.
+    if (isFull) this.caseClashes = new Map();
+    const owner = new Map<string, string>();
+    for (const k of Object.keys(this.state.bases)) owner.set(fold(k), k);
+    const remote = new Map<string, Version | null>();
+    const entries = answer.entries.map((e) => ({ key: keyOf(e.path), version: e.version })).sort((a, b) => cmp(a.key, b.key));
+    for (const { key, version } of entries) {
+      const winner = owner.get(fold(key));
+      if (caseInsensitive && winner !== undefined && winner !== key) {
+        if (version === null) this.caseClashes.delete(key);
+        else this.caseClashes.set(key, winner);
+        continue;
+      }
+      if (version !== null) owner.set(fold(key), key);
+      this.caseClashes.delete(key);
+      remote.set(key, version);
+    }
+
+    const keys = new Set<string>([...remote.keys(), ...this.dirty]);
+    if (isFull) {
+      for (const k of Object.keys(this.state.bases)) keys.add(k);
+      for (const [k, path] of localKeys) {
+        const winner = owner.get(fold(k)) ?? k;
+        if (winner !== k) this.localPathOf.set(winner, path);
+        if (!this.caseClashes.has(k)) keys.add(winner);
+      }
+    }
+
+    const damagedPossible = isFull && answer.damaged > 0;
+    for (const key of [...keys].sort(cmp)) {
+      if (this.stopped) return;
+      const known = isFull ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : (this.state.bases[key] ?? null);
+      await this.syncPath(key, known, damagedPossible);
+    }
+
+    if (isFull) {
+      this.damaged = answer.damaged;
+      this.state.lastFullAt = new Date(this.o.clock.now()).toISOString();
+    }
+    // Only after every path is done: a check that fails halfway asks again from the old cursor.
+    this.state.cursor = answer.cursor;
+    this.state.lastSyncAt = new Date(this.o.clock.now()).toISOString();
+    await this.save();
+  }
+
+  /** Lists the local files: spellings, attachments and conflict copies. Returns key → path of the syncable ones. */
+  private async scanLocal(full: boolean): Promise<Map<string, string>> {
+    const found = new Map<string, string>();
+    if (full) this.attachments.clear();
+    for (const path of await this.o.local.list()) {
+      const kind = eligibility(path);
+      if (kind === "attachment") this.attachments.add(path);
+      if (kind !== "sync") continue;
+      const key = keyOf(path);
+      found.set(key, path);
+      this.localPathOf.set(key, path);
+      if (COPY_NAME.test(key)) this.conflicts.add(key);
+    }
+    for (const copy of [...this.conflicts]) if (!found.has(copy)) this.conflicts.delete(copy);
+    return found;
+  }
+
+  private async syncPath(key: string, remote: Version | null, damagedPossible: boolean): Promise<void> {
+    if (eligibility(key) !== "sync" || this.caseClashes.has(key)) {
+      this.dirty.delete(key);
+      return;
+    }
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      if (this.stopped) return;
+      const path = this.localPathOf.get(key) ?? key;
+      const text = await this.o.local.read(path);
+      const local = text === null ? null : await versionOf(text);
+      const base = this.state.bases[key] ?? null;
+      const action = decide({ local, remote, base, remoteDamagedPossible: damagedPossible });
+      const again = await this.act(key, path, text, local, remote, action);
+      if (again === undefined) {
+        this.dirty.delete(key);
+        return;
+      }
+      remote = again.remote;
+    }
+  }
+
+  private async act(
+    key: string, path: string, text: string | null, local: Version | null, remote: Version | null, action: Action,
+  ): Promise<Again | undefined> {
+    switch (action.kind) {
+      case "nothing":
+        if (local === null && remote === null && this.state.bases[key] !== undefined) {
+          delete this.state.bases[key];
+          await this.save();
+        }
+        return undefined;
+
+      case "recordBase":
+        this.forgetProblems(key);
+        await this.setBase(key, action.version);
+        return undefined;
+
+      case "upload":
+      case "reupload":
+        return this.upload(key, text!, local!, action.kind === "upload" ? action.base : null);
+
+      case "download": {
+        const note = await this.o.remote.read(key);
+        if (note === null) return { remote: null };
+        if (!(await this.o.local.writeIf(path, local, note.content))) return { remote: note.version };
+        this.localPathOf.set(key, path);
+        this.forgetProblems(key);
+        await this.setBase(key, note.version);
+        return undefined;
+      }
+
+      case "trashLocal": {
+        // Asked again right before: a keystroke since the read makes it an edit, not a file to trash.
+        const now = await this.o.local.read(path);
+        if (now === null || (await versionOf(now)) !== local) return { remote };
+        await this.o.local.trashByPreference(path);
+        delete this.state.bases[key];
+        await this.save();
+        return undefined;
+      }
+
+      case "deleteRemote": {
+        const result = await this.o.remote.remove(key, action.base);
+        if (!result.ok && result.conflict !== null) return { remote: result.conflict.version };
+        delete this.state.bases[key];
+        this.forgetProblems(key);
+        await this.save();
+        return undefined;
+      }
+
+      case "conflict":
+        return this.conflict(key, path, text!, local!, remote);
+    }
+  }
+
+  private async upload(key: string, text: string, local: Version, base: Version | null): Promise<Again | undefined> {
+    if (this.rejected.get(key)?.version === local) return undefined;
+    this.rejected.delete(key);
+    if (byteSize(text) > MAX_BYTES) {
+      this.tooLarge.add(key);
+      return undefined;
+    }
+    this.tooLarge.delete(key);
+    let result;
+    try {
+      result = await this.o.remote.put(key, text, base);
+    } catch (e) {
+      if (!(e instanceof RejectedError)) throw e;
+      this.rejected.set(key, { version: local, detail: e.message });
+      return undefined;
+    }
+    if (!result.ok) return { remote: result.conflict.version };
+    await this.setBase(key, result.version);
+    return undefined;
+  }
+
+  /** Kumbu²'s version keeps the path; the local text becomes a copy next to it (spec §7). */
+  private async conflict(key: string, path: string, text: string, local: Version, remote: Version | null): Promise<Again | undefined> {
+    const note = await this.o.remote.read(key);
+    if (note === null) return { remote: null };
+    if (note.version !== remote) return { remote: note.version };
+    const at = new Date(this.o.clock.now());
+    const copyText = conflictCopyText(text, {
+      device: this.o.device, localAt: at, remoteWriter: note.lastWriter, remoteAt: new Date(note.lastWriteAt), originalPath: key,
+    });
+    const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, at));
+    if (!(await this.o.local.writeIf(copy, null, copyText))) return { remote };
+    // The copy is safe on disk before the original is overwritten, so a failure from here on loses nothing.
+    if (!(await this.o.local.writeIf(path, local, note.content))) return { remote };
+    await this.setBase(key, note.version);
+    const copyKey = keyOf(copy);
+    this.localPathOf.set(copyKey, copy);
+    this.conflicts.add(copyKey);
+    this.dirty.add(copyKey);
+    this.o.onConflict(key, copyKey);
+    await this.syncPath(copyKey, null, false);
+    return undefined;
+  }
+
+  private async freeCopyPath(candidate: string): Promise<string> {
+    let path = candidate;
+    for (let n = 2; (await this.o.local.read(path)) !== null; n++) path = candidate.replace(/\.md$/, ` ${n}.md`);
+    return path;
+  }
+
+  private forgetProblems(key: string): void {
+    this.rejected.delete(key);
+    this.tooLarge.delete(key);
+  }
+
+  private async setBase(key: string, version: Version): Promise<void> {
+    this.state.bases[key] = version;
+    await this.save();
+  }
+
+  private save(): Promise<void> {
+    return this.o.state.save(this.state);
+  }
+
+  private failed(e: unknown): void {
+    if (e instanceof AuthError) {
+      this.stopped = true;
+      for (const h of this.debounces.values()) this.o.clock.clearTimeout(h);
+      this.debounces.clear();
+      this.cancelRetry();
+      this.o.onAuthLost();
+      return;
+    }
+    // Offline, or anything unexpected: nothing is dropped (dirty paths stay), and a check is tried again later.
+    if (!(e instanceof OfflineError)) console.error("Kumbu² Sync:", e);
+    this.offline = true;
+    const backoff = this.retryDelay === 0 ? RETRY_FIRST_MS : Math.min(RETRY_MAX_MS, this.retryDelay * 2);
+    this.retryDelay = backoff;
+    const delay = e instanceof OfflineError && e.retryAfterMs !== null ? e.retryAfterMs : backoff;
+    this.cancelRetry();
+    this.retryHandle = this.o.clock.setTimeout(() => {
+      this.retryHandle = null;
+      void this.check(false);
+    }, delay);
+  }
+
+  private online(): void {
+    if (!this.offline) return;
+    this.offline = false;
+    this.retryDelay = 0;
+    this.cancelRetry();
+  }
+
+  private cancelRetry(): void {
+    if (this.retryHandle !== null) this.o.clock.clearTimeout(this.retryHandle);
+    this.retryHandle = null;
+  }
+
+  private cancelDebounce(key: string): void {
+    const h = this.debounces.get(key);
+    if (h !== undefined) this.o.clock.clearTimeout(h);
+    this.debounces.delete(key);
+  }
+
+  private emit(): void {
+    this.o.onStatus(this.status());
+  }
+}
+
+/** Ordinal order, the same on every device. */
+function cmp(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}

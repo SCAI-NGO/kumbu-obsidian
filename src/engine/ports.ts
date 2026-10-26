@@ -29,6 +29,8 @@ export interface RemoteApi {
 }
 
 export interface LocalFiles {
+  /** True where "Plan.md" and "plan.md" are one file (macOS, Windows, Android, iOS). */
+  readonly caseInsensitive: boolean;
   list(): Promise<string[]>; // vault-relative paths of all files, any extension
   read(path: string): Promise<string | null>;
   size(path: string): Promise<number | null>; // bytes on disk

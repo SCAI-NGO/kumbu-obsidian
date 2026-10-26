@@ -32,7 +32,9 @@ export default defineConfig([
   },
   {
     // Tests name ".obsidian" on purpose: it is the default config folder the paths must skip.
+    // Tests run in Node, not in a popout window.
     files: ["test/**"],
-    rules: { "obsidianmd/hardcoded-config-path": "off" },
+    languageOptions: { globals: { setImmediate: "readonly" } },
+    rules: { "obsidianmd/hardcoded-config-path": "off", "obsidianmd/prefer-window-timers": "off" },
   },
 ]);
