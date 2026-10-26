@@ -1,0 +1,74 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+.kumbu-sync-hidden {
+  display: none;
+}
+
+.kumbu-sync-status.is-offline {
+  color: var(--text-muted);
+}
+
+.kumbu-sync-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2);
+  margin: var(--size-4-3) 0;
+}
+
+.kumbu-sync-option {
+  display: flex;
+  gap: var(--size-4-3);
+  align-items: flex-start;
+  padding: var(--size-4-3);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  cursor: pointer;
+}
+
+.kumbu-sync-option.is-recommended {
+  border-color: var(--interactive-accent);
+}
+
+.kumbu-sync-option-title {
+  font-weight: var(--font-semibold);
+}
+
+.kumbu-sync-option-desc {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  word-break: break-word;
+}
+
+.kumbu-sync-headline {
+  font-size: var(--font-ui-large);
+  font-weight: var(--font-semibold);
+}
+
+.kumbu-sync-counts {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--size-4-2);
+  text-align: center;
+}
+
+.kumbu-sync-count-value {
+  font-size: var(--font-ui-large);
+  font-weight: var(--font-semibold);
+}
+
+.kumbu-sync-count-label,
+.kumbu-sync-muted {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.kumbu-sync-paths {
+  max-height: 50vh;
+  overflow-y: auto;
+  word-break: break-word;
+}
+
+.kumbu-sync-fallback summary {
+  cursor: pointer;
+  padding: var(--size-4-2) 0;
+}

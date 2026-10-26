@@ -1,0 +1,9 @@
+{
+  "id": "kumbu-sync",
+  "name": "Kumbu² Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.11.4",
+  "description": "Keeps this vault in sync with a Kumbu² vault.",
+  "author": "SCAI-NGO",
+  "isDesktopOnly": false
+}
