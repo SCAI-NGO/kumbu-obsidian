@@ -37,6 +37,15 @@ describe("put", () => {
     expect(await api(http).put("a.md", "text", "bbbbbbbbbbbb")).toEqual({ ok: true, version: "cccccccccccc" });
     expect(JSON.parse(http.last!.body!)).toEqual({ content: "text" });
   });
+  test("a 404 on a put with a base means the note is gone: it becomes a create", async () => {
+    const http = fakeHttp({ status: 404, body: { error: "No note /Work/a.md." } }, { status: 201, body: note });
+    expect(await api(http).put("a.md", "text", "bbbbbbbbbbbb")).toEqual({ ok: true, version: "cccccccccccc" });
+    expect(http.calls).toHaveLength(2);
+    expect(JSON.parse(http.last!.body!)).toEqual({ content: "text" });
+  });
+  test("a 404 on a create means the key lost the vault", async () => {
+    await expect(api(fakeHttp({ status: 404, body: { error: "No vault Work." } })).put("a.md", "text", null)).rejects.toBeInstanceOf(AuthError);
+  });
   test("uploads send the LF text", async () => {
     const http = fakeHttp({ status: 200, body: note });
     await api(http).put("a.md", "a\r\nb", "bbbbbbbbbbbb");

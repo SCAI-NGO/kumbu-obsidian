@@ -59,7 +59,11 @@ export class KumbuApi implements RemoteApi {
       if (base !== null) return this.put(path, content, null);
       throw new OfflineError(errorOf(r) ?? "The server refused the write and the note isn't there; trying again later.");
     }
-    if (r.status === 404) throw new AuthError(errorOf(r) ?? `This key can't open the vault ${this.vault} any more.`);
+    if (r.status === 404) {
+      // With a base, 404 is the note gone (the server's answer to a version it can't find): create it anew.
+      if (base !== null) return this.put(path, content, null);
+      throw new AuthError(errorOf(r) ?? `This key can't open the vault ${this.vault} any more.`);
+    }
     expectOk(r);
     return { ok: true, version: parse<NoteView>(r).version };
   }
