@@ -12,7 +12,7 @@ The design is in the server repository: [`docs/superpowers/specs/2026-10-26-obsi
 
 ## Network use
 
-The plugin talks only to the Kumbu² server you enter. It uses HTTPS (plain HTTP only for `localhost` and `127.0.0.1`), for REST calls and for one WebSocket that tells it when the vault changed. It sends the text of every `.md` note outside dot folders, and nothing else: no attachments, no settings, no telemetry.
+The plugin talks only to the Kumbu² server you enter. It uses HTTPS (plain HTTP only for `localhost` and `127.0.0.1`), for REST calls and for one WebSocket that tells it when the vault changed. It sends the paths and text of every `.md` note outside dot folders, and the device name when pairing (it becomes the key's name in Kumbu², and conflict copies carry it). Nothing else: no attachments, no settings, no telemetry.
 
 ## Installation
 
@@ -31,11 +31,11 @@ If you already have an API key with write access to the vault, "I have an API ke
 
 **What doesn't sync:** attachments (images, PDFs and other files; Kumbu² keeps text only), anything in dot folders, notes larger than 1 MiB, and a note whose path differs only in case from another note, on systems where that would be the same file. The settings list each note that isn't synced, with the reason.
 
-**Conflict copies:** if a note changed in Kumbu² while you were editing it, the note gets the Kumbu² text and your text goes to `<name> (conflict <device> YYYY-MM-DD HH-mm).md` next to it. The copy starts with a callout naming both changes and linking to the original. Merge what you need into the original, then delete the copy. The settings list the open conflict copies.
+**Conflict copies:** if a note changed in Kumbu² while you were editing it, the note gets the Kumbu² text and your text goes to `<name> (conflict <device> YYYY-MM-DD HH-mm).md` next to it. The copy starts (after any frontmatter) with a callout naming both changes and linking to the original. Merge what you need into the original, then delete the copy. The settings list the open conflict copies.
 
 **The status bar** shows `Kumbu² ● live` while the WebSocket is connected, `● polling` while it isn't (the plugin then checks every 2 minutes) and `○ offline` while the server can't be reached. It adds `· 3 not synced` when notes are left out. A click opens the settings. The command **Sync now** checks at once.
 
-**Disconnecting** (in the settings) stops syncing and forgets the key. Your files stay as they are. The device's key stays on the server until you revoke it in the web app's API keys page.
+**Disconnecting** (in the settings) stops syncing and forgets the key it stored when pairing. A key you picked yourself under "I have an API key already" stays in Obsidian's secret storage. Your files stay as they are. The device's key stays on the server until you revoke it in the web app's API keys page.
 
 ## Where the key is kept
 

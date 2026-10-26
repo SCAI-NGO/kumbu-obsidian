@@ -5,23 +5,36 @@ on:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Check that the tag is the manifest's version
+      # Pinned by commit: this job can publish the main.js that BRAT installs on every device.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check that the tag is the version in manifest.json, package.json and versions.json
         run: |
-          version=$(node -p "require('./manifest.json').version")
-          if [ "$GITHUB_REF_NAME" != "$version" ]; then
-            echo "The tag $GITHUB_REF_NAME is not manifest.json's version $version." >&2
-            exit 1
-          fi
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+          node -e '
+            const tag = process.env.GITHUB_REF_NAME;
+            const manifest = require("./manifest.json");
+            const pkg = require("./package.json");
+            const versions = require("./versions.json");
+            const problems = [];
+            if (manifest.version !== tag) problems.push(`manifest.json has version ${manifest.version}`);
+            if (pkg.version !== tag) problems.push(`package.json has version ${pkg.version}`);
+            if (versions[tag] !== manifest.minAppVersion) {
+              problems.push(`versions.json maps ${tag} to ${versions[tag]}, not to minAppVersion ${manifest.minAppVersion}`);
+            }
+            if (problems.length > 0) {
+              console.error(`The tag ${tag} does not match: ${problems.join("; ")}.`);
+              process.exit(1);
+            }
+          '
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
