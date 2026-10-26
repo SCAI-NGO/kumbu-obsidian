@@ -219,7 +219,10 @@ describe("pairing", () => {
     const network = redeemPairing(fakeHttp(new TypeError("fetch failed")), "https://k.example", "K7QM4XDA", "L");
     await expect(network).rejects.toThrow("Try again in a moment with the same code.");
   });
-  test("too many attempts is rejected with the server's sentence", async () => {
-    await expect(redeemPairing(fakeHttp({ status: 429, body: { error: "Too many attempts." } }), "https://k.example", "x", "L")).rejects.toThrow("Too many attempts.");
+  test("too many attempts (also for a right code, while the server-wide limit holds) keeps the code: wait and retry", async () => {
+    const p = redeemPairing(fakeHttp({ status: 429, headers: { "Retry-After": "30" }, body: { error: "Too many attempts." } }), "https://k.example", "K7QM4XDA", "L");
+    await expect(p).rejects.toBeInstanceOf(OfflineError);
+    await expect(p).rejects.toThrow("Too many attempts. Try again in a moment with the same code.");
+    await expect(p).rejects.toMatchObject({ retryAfterMs: 30000 });
   });
 });

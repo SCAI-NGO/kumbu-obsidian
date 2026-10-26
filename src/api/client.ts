@@ -126,15 +126,16 @@ export async function redeemPairing(http: HttpFn, server: string, code: string, 
   } catch (e) {
     throw new OfflineError(`The server can't be reached. ${RETRY_SAME_CODE}`, e instanceof OfflineError ? e.retryAfterMs : null);
   }
-  // A vault being re-encrypted (503) or a passing server error (5xx) leaves the code valid.
-  if (r.status >= 500) {
+  // A vault being re-encrypted (503), a passing server error (5xx) and the rate limits (429, which while the
+  // server-wide limit holds also meets a right code) all leave the code valid: wait and retry.
+  if (r.status >= 500 || r.status === 429) {
     throw new OfflineError(`${errorOf(r) ?? `The server answered ${r.status}.`} ${RETRY_SAME_CODE}`, retryAfterMs(r));
   }
   if (r.status === 409) {
     // Every "<Vault> – Obsidian <device>" name up to " 20" is taken, and the code is used up.
     throw new RejectedError(`${errorOf(r) ?? "That key name is taken."} Change the device name and make a new code in the web app.`, 409);
   }
-  if (r.status === 404 || r.status === 400 || r.status === 429) throw new RejectedError(errorOf(r) ?? WRONG_CODE, r.status);
+  if (r.status === 404 || r.status === 400) throw new RejectedError(errorOf(r) ?? WRONG_CODE, r.status);
   expectOk(r);
   return parse<RedeemView>(r);
 }
