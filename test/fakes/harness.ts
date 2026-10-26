@@ -23,7 +23,7 @@ export const fakeClock: Clock = {
 
 export interface Harness {
   engine: SyncEngine; server: FakeServer; files: FakeFiles; state: MemoryState;
-  conflicts: [string, string][]; authLost: number; statuses: SyncStatus[]; firstSyncsDone: FirstSyncSummary[];
+  conflicts: [string, string][]; authLost: number; statuses: SyncStatus[]; firstSyncsDone: FirstSyncSummary[]; cancelled: number;
 }
 
 /**
@@ -47,13 +47,14 @@ export async function harness(o: {
   for (const [p, t] of Object.entries(o.localOnly ?? {})) files.files.set(p, t);
   for (const [p, t] of Object.entries(o.remoteOnly ?? {})) await server.seed(p, t);
   const state = new MemoryState({ bases, cursor: null, lastFullAt: null, lastSyncAt: null });
-  const h: Harness = { engine: undefined as unknown as SyncEngine, server, files, state, conflicts: [], authLost: 0, statuses: [], firstSyncsDone: [] };
+  const h: Harness = { engine: undefined as unknown as SyncEngine, server, files, state, conflicts: [], authLost: 0, statuses: [], firstSyncsDone: [], cancelled: 0 };
   h.engine = new SyncEngine({
     vault: "Work", device: "Laptop", local: files, remote: server, state, clock: fakeClock,
     onStatus: (s) => h.statuses.push(s),
     onConflict: (original, copy) => h.conflicts.push([original, copy]),
     onAuthLost: () => { h.authLost++; },
     onFirstSyncDone: (summary) => h.firstSyncsDone.push(summary),
+    onFirstSyncCancelled: () => { h.cancelled++; },
   });
   if (o.start !== false) await h.engine.start();
   server.calls.length = 0;

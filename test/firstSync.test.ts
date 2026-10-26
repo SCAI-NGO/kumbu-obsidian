@@ -182,3 +182,24 @@ test("a first sync stopped half way stops writing and saves no cursor", async ()
   expect(n).toBe(1);
   expect(h.firstSyncsDone).toEqual([]);
 });
+
+test("cancelling the question on a retry is reported, so the plugin can disconnect", async () => {
+  const h = await harness({ start: false, localOnly: { "d.md": "local" }, remoteOnly: { "d.md": "kumbu" } });
+  h.server.failNext("versions", new OfflineError("no network"));
+  await expect(h.engine.firstSync(chooser(null))).rejects.toBeInstanceOf(OfflineError);
+  expect(h.cancelled).toBe(0);
+  await h.engine.check(false);
+  expect(h.cancelled).toBe(1);
+  expect(h.state.saves).toBe(0);
+});
+
+test("a check that comes in before the first sync has loaded its state waits for the first sync", async () => {
+  const h = await harness({ start: false, localOnly: { "d.md": "local" }, remoteOnly: { "d.md": "kumbu" } });
+  const choose = chooser("kumbu");
+  const first = h.engine.firstSync(choose);
+  const hint = h.engine.check(false);
+  await Promise.all([first, hint]);
+  expect(choose.plans).toHaveLength(1);
+  expect(h.files.files.get("d.md")).toBe("kumbu");
+  expect([...h.files.files.keys()].filter((p) => p.includes("(conflict "))).toEqual([]);
+});

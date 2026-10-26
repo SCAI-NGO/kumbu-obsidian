@@ -19,6 +19,8 @@ export interface EngineOptions {
   onAuthLost(): void;
   /** A first sync finished, also one that finished on a retry after its first attempt failed. */
   onFirstSyncDone?(summary: FirstSyncSummary): void;
+  /** The user closed the first sync's question without an answer: nothing was saved. */
+  onFirstSyncCancelled?(): void;
 }
 
 const DEBOUNCE_MS = 2000;
@@ -60,6 +62,7 @@ export class SyncEngine {
   private copiesMade = 0;
   /** Set while a first sync hasn't finished: checks retry it, and local events wait for it. */
   private firstSyncChoose: ((plan: MergePlan) => Promise<Choice | null>) | null = null;
+  private loading: Promise<void> = Promise.resolve();
 
   constructor(o: EngineOptions) {
     this.o = o;
@@ -307,9 +310,10 @@ export class SyncEngine {
    * (nothing saved). A failure stops the engine and is thrown; running it again finishes the job.
    */
   async firstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
-    this.state = await this.o.state.load();
+    // Set before any await, so a check that comes in now is routed to the first sync by construction.
     this.stopped = false;
     this.firstSyncChoose = choose;
+    this.loading = this.o.state.load().then((state) => { this.state = state; });
     const outcome = await this.firstSyncJob();
     if (outcome.error !== null) throw outcome.error;
     return outcome.summary;
@@ -326,6 +330,7 @@ export class SyncEngine {
       if (this.stopped || choose === null) return;
       this.emit();
       try {
+        await this.loading;
         outcome.summary = await this.runFirstSync(choose);
         if (this.stopped) {
           // Not a cancelled question: the plugin keeps the connection, and the next start finishes the job.
@@ -335,8 +340,11 @@ export class SyncEngine {
         }
         this.firstSyncChoose = null;
         this.online();
-        if (outcome.summary === null) this.stopped = true;
-        else this.o.onFirstSyncDone?.(outcome.summary);
+        if (outcome.summary === null) {
+          this.stopped = true;
+          // Also from a retry, whose caller isn't waiting any more: the plugin disconnects.
+          this.o.onFirstSyncCancelled?.();
+        } else this.o.onFirstSyncDone?.(outcome.summary);
       } catch (e) {
         outcome.error = e instanceof Error ? e : new Error("The first sync failed.");
         this.failed(e);

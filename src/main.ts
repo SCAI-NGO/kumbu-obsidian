@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The plugin: settings and state in data.json, the engine and the hints wired to the vault's events.
-import { Notice, Platform, Plugin, TAbstractFile, TFile } from "obsidian";
+import { Notice, Platform, Plugin, TAbstractFile, TFile, type App } from "obsidian";
 import { KumbuApi, redeemPairing, trimServer } from "./api/client";
 import { SyncEngine } from "./engine/engine";
 import { defaultDeviceName, secretId, serverProblem } from "./engine/paths";
@@ -20,6 +20,12 @@ export interface PluginData { settings: Settings; state: SyncState; }
 
 export const emptyState = (): SyncState => ({ bases: {}, cursor: null, lastFullAt: null, lastSyncAt: null });
 const emptySettings = (): Settings => ({ server: "", vault: "", device: "", secretId: "", ownsSecret: false });
+
+/** Unique per Obsidian vault where the app has it (appId, undocumented), else the vault's folder name. */
+function localVaultId(app: App): string {
+  const appId = (app as unknown as { appId?: unknown }).appId;
+  return typeof appId === "string" && appId !== "" ? appId : app.vault.getName();
+}
 
 function platformName(): string {
   if (Platform.isAndroidApp) return "Android";
@@ -125,7 +131,7 @@ export default class KumbuSyncPlugin extends Plugin {
       new Notice(e instanceof Error ? e.message : "The server can't be reached.");
       return false;
     }
-    const id = secretId(paired.vault, s.device, this.app.vault.getName());
+    const id = secretId(paired.vault, s.device, localVaultId(this.app));
     storeKey(this.app, id, paired.key);
     await this.connectTo(paired.vault, id, true);
     return true;
@@ -166,9 +172,8 @@ export default class KumbuSyncPlugin extends Plugin {
 
   private async firstSync(engine: SyncEngine): Promise<void> {
     const s = this.data.settings;
-    let summary;
     try {
-      summary = await engine.firstSync((plan) => new ConflictChoiceModal(this.app, plan, s.vault, s.device).choose());
+      await engine.firstSync((plan) => new ConflictChoiceModal(this.app, plan, s.vault, s.device).choose());
     } catch (e) {
       // Lost key: onAuthLost said so. Stopped (Disconnect, unload): nothing to say.
       if (e instanceof AuthError || this.engine !== engine) return;
@@ -176,9 +181,8 @@ export default class KumbuSyncPlugin extends Plugin {
       new Notice(`Kumbu² Sync: the first sync stopped (${why}). It goes on by itself once the server can be reached.`);
       return;
     }
-    // Cancelled: not connected, nothing kept but the server and the device name. (A finished one shows its
-    // result through onFirstSyncDone, also when it finishes on a retry.)
-    if (summary === null) await this.forgetConnection();
+    // A finished one shows its result through onFirstSyncDone, a cancelled one disconnects through
+    // onFirstSyncCancelled, both also when it happens on a retry.
   }
 
   private async forgetConnection(): Promise<void> {
@@ -245,6 +249,8 @@ export default class KumbuSyncPlugin extends Plugin {
       },
       onAuthLost: () => this.authLost(),
       onFirstSyncDone: (summary) => new ResultModal(this.app, this.data.settings.vault, summary).open(),
+      // Cancelled: not connected, nothing kept but the server and the device name.
+      onFirstSyncCancelled: () => void this.forgetConnection(),
     });
   }
 
