@@ -225,7 +225,10 @@ export class SyncEngine {
     const damagedPossible = answer.full && answer.damaged > 0;
     for (const key of keys) {
       if (this.stopped) return;
-      const known = answer.full ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : (this.state.bases[key] ?? null);
+      const base = this.state.bases[key] ?? null;
+      const known = answer.full ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : base;
+      // Still being typed in: its debounce uploads it (spec §6, rule 6), unless the server has news for it.
+      if (this.debounces.has(key) && known === base) continue;
       await this.syncPath(key, known, damagedPossible);
     }
     await this.finishCheck(answer);

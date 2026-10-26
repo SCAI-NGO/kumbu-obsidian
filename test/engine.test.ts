@@ -24,6 +24,32 @@ describe("normal use", () => {
     expect(h.state.state.bases["a.md"]).toBe(await versionOf("three"));
   });
 
+  test("a check does not upload a path whose debounce is still running", async () => {
+    const h = await harness({ synced: { "a.md": "one", "b.md": "b" } });
+    h.files.userEdit("a.md", "half typed");
+    h.engine.localChanged("a.md");
+    await vi.advanceTimersByTimeAsync(500);
+    await h.engine.check(false);
+    await h.engine.check(true);
+    expect(h.server.count("put")).toBe(0);
+    h.files.userEdit("a.md", "typed");
+    h.engine.localChanged("a.md");
+    await settle(h, 2000);
+    expect(h.server.count("put")).toBe(1);
+    expect(h.server.notes.get("a.md")!.content).toBe("typed");
+  });
+
+  test("a check still decides a debounced path the server changed", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    h.files.userEdit("a.md", "mine");
+    h.engine.localChanged("a.md");
+    await h.server.agentWrite("a.md", "agent");
+    await vi.advanceTimersByTimeAsync(500);
+    await h.engine.check(false);
+    expect(h.files.files.get("a.md")).toBe("agent");
+    expect([...h.files.files.values()].some((t) => t.includes("mine"))).toBe(true);
+  });
+
   test("downloads an agent edit on check", async () => {
     const h = await harness({ synced: { "a.md": "one" } });
     await h.server.agentWrite("a.md", "agent text");
