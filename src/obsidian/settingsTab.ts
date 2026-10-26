@@ -2,11 +2,10 @@
 // Settings → Kumbu² Sync: pairing (or a key made by hand) when not connected, the sync's state when connected.
 import { Notice, PluginSettingTab, SecretComponent, Setting, type App } from "obsidian";
 import type KumbuSyncPlugin from "../main";
-import { isAllowedServerUrl, isValidDeviceName } from "../engine/paths";
+import { isValidDeviceName, serverProblem } from "../engine/paths";
 import { reasonText } from "./texts";
 
 const DEVICE_RULE = "A device name has 1 to 32 letters, digits, spaces, dashes or underscores.";
-const URL_RULE = "The server URL must start with https:// (http:// only for localhost).";
 
 export class KumbuSettingTab extends PluginSettingTab {
   private code = "";
@@ -91,8 +90,9 @@ export class KumbuSettingTab extends PluginSettingTab {
     connect.settingEl.hide();
     const id = this.pickedSecret;
     if (!id) return;
-    if (!isAllowedServerUrl(this.plugin.data.settings.server)) {
-      el.createEl("p", { cls: "kumbu-sync-muted", text: URL_RULE });
+    const problem = serverProblem(this.plugin.data.settings.server);
+    if (problem !== null) {
+      el.createEl("p", { cls: "kumbu-sync-muted", text: problem });
       return;
     }
     let vaults: { name: string; canWrite: boolean }[];
@@ -145,8 +145,9 @@ export class KumbuSettingTab extends PluginSettingTab {
 
   private valid(): boolean {
     const s = this.plugin.data.settings;
-    if (!isAllowedServerUrl(s.server)) {
-      new Notice(URL_RULE);
+    const problem = serverProblem(s.server);
+    if (problem !== null) {
+      new Notice(problem);
       return false;
     }
     if (!isValidDeviceName(s.device)) {

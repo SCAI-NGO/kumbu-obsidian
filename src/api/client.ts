@@ -71,7 +71,12 @@ export class KumbuApi implements RemoteApi {
   async remove(path: string, base: Version): Promise<DeleteResult> {
     const r = await this.send("DELETE", `${urlFor(this.vault, path)}?version=${encodeURIComponent(base)}`);
     if (r.status === 404) return { ok: false, conflict: null };
-    if (r.status === 409) return { ok: false, conflict: await this.conflictOf(r, path) };
+    if (r.status === 409) {
+      const conflict = await this.conflictOf(r, path);
+      // Still at the version sent, so it is not a change elsewhere: the server refused the delete itself.
+      if (conflict?.version === base) throw new RejectedError(errorOf(r) ?? "The server refused to trash this note.");
+      return { ok: false, conflict };
+    }
     expectOk(r);
     return { ok: true };
   }

@@ -45,6 +45,25 @@ afterEach(() => { vi.useRealTimers(); });
 test("the WebSocket url follows the server's scheme", () => {
   expect(wsUrlFor("https://k.example/", "a b")).toBe("wss://k.example/api/ws?ticket=a%20b");
   expect(wsUrlFor("http://localhost:8080", "t")).toBe("ws://localhost:8080/api/ws?ticket=t");
+  expect(wsUrlFor("HTTPS://Kumbu.example", "t")).toBe("wss://kumbu.example/api/ws?ticket=t");
+});
+
+test("a socket that can't even be constructed counts as a failed connection", async () => {
+  let fail = true;
+  const c = new HintConnection({
+    ticket: () => ticket(), wsUrl: (t) => wsUrlFor("https://k.example", t),
+    open: (url) => {
+      if (fail) throw new SyntaxError("bad url");
+      const s = new FakeSocket(url); sockets.push(s); return s;
+    },
+    vault: "Work", clock: fakeClock, random: () => 1, check: (full) => checks.push(full), onMode: (m) => modes.push(m),
+  });
+  c.start();
+  await flush();
+  fail = false;
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(sockets).toHaveLength(1);
+  c.stop();
 });
 
 test("after an open: a check and mode live", async () => {
@@ -91,8 +110,8 @@ test("backoff delays 1, 2, 4 s … capped at 300 s", async () => {
   c.stop();
 });
 
-test("the delay has full jitter", async () => {
-  const c = connection(() => 0.5);
+test("the delay has equal jitter: never below half of it", async () => {
+  const c = connection(() => 0);
   c.start();
   await flush();
   last().drop();
@@ -100,6 +119,20 @@ test("the delay has full jitter", async () => {
   expect(sockets).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(1);
   expect(sockets).toHaveLength(2);
+  c.stop();
+});
+
+test("a connection that opens and closes at once still counts towards polling", async () => {
+  const c = connection(() => 1);
+  c.start();
+  await flush();
+  for (let i = 0; i < 3; i++) {
+    last().open();
+    await vi.advanceTimersByTimeAsync(100);
+    last().drop(1001);
+    await vi.advanceTimersByTimeAsync(2 ** i * 1000);
+  }
+  expect(modes).toContain("polling");
   c.stop();
 });
 
@@ -115,9 +148,12 @@ test("polling starts after the third failure and stops after a successful open",
   last().drop();
   expect(modes).toContain("polling");
   checks = [];
-  await vi.advanceTimersByTimeAsync(4000); // reconnects, but the socket doesn't open
-  await vi.advanceTimersByTimeAsync(2 * 60_000 - 4000);
-  expect(checks.filter((f) => !f).length).toBeGreaterThanOrEqual(1);
+  await vi.advanceTimersByTimeAsync(2 * 60_000 - 1); // reconnects, but the socket doesn't open
+  expect(checks).toEqual([]);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(checks).toEqual([false]);
+  await vi.advanceTimersByTimeAsync(2 * 60_000);
+  expect(checks).toEqual([false, false]);
   last().open();
   expect(modes[modes.length - 1]).toBe("live");
   checks = [];
@@ -138,18 +174,21 @@ test("a ticket that can't be fetched offline says offline and retries", async ()
   c.stop();
 });
 
-test("an AuthError from the ticket stops it and lets the engine find out", async () => {
+test("an AuthError from the ticket lets the engine find out and tries again slowly", async () => {
   ticket = () => Promise.reject(new AuthError("revoked"));
   const c = connection();
   c.start();
   await flush();
   expect(checks).toEqual([false]);
-  await vi.advanceTimersByTimeAsync(10 * 60_000);
   expect(sockets).toHaveLength(0);
+  // If the engine's own call succeeds (a passing 401), the hints must not be gone for good.
+  ticket = () => Promise.resolve("t2");
+  await vi.advanceTimersByTimeAsync(2 * 60_000);
+  expect(sockets).toHaveLength(1);
   c.stop();
 });
 
-test("close 4401 stops reconnecting", async () => {
+test("close 4401 lets the engine find out and tries again slowly", async () => {
   const c = connection();
   c.start();
   await flush();
@@ -157,8 +196,10 @@ test("close 4401 stops reconnecting", async () => {
   checks = [];
   last().drop(4401);
   expect(checks).toEqual([false]);
-  await vi.advanceTimersByTimeAsync(10 * 60_000);
+  await vi.advanceTimersByTimeAsync(2 * 60_000 - 1);
   expect(sockets).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(sockets).toHaveLength(2);
   c.stop();
 });
 

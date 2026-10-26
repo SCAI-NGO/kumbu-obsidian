@@ -29,9 +29,15 @@ const POLL_AFTER_FAILURES = 3;
 const POLL_MS = 2 * 60_000;
 const FULL_CHECK_MS = 60 * 60_000;
 
-/** https://host → wss://host/api/ws?ticket=…, http → ws. */
+const STABLE_MS = 30_000;
+
+/** https://host → wss://host/api/ws?ticket=…, http → ws (any case: the URL rule accepts "HTTPS://"). */
 export function wsUrlFor(server: string, ticket: string): string {
-  return `${trimServer(server).replace(/^http/, "ws")}/api/ws?ticket=${encodeURIComponent(ticket)}`;
+  const url = new URL(trimServer(server));
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/api/ws`;
+  url.search = `?ticket=${encodeURIComponent(ticket)}`;
+  return url.toString();
 }
 
 export class HintConnection {
@@ -41,6 +47,7 @@ export class HintConnection {
   private reconnectTimer: unknown = null;
   private pollTimer: unknown = null;
   private hourlyTimer: unknown = null;
+  private stableTimer: unknown = null;
 
   constructor(private readonly o: HintOptions) {}
 
@@ -56,8 +63,8 @@ export class HintConnection {
     const socket = this.socket;
     this.socket = null;
     socket?.close();
-    for (const t of [this.reconnectTimer, this.pollTimer, this.hourlyTimer]) if (t !== null) this.o.clock.clearTimeout(t);
-    this.reconnectTimer = this.pollTimer = this.hourlyTimer = null;
+    for (const t of [this.reconnectTimer, this.pollTimer, this.hourlyTimer, this.stableTimer]) if (t !== null) this.o.clock.clearTimeout(t);
+    this.reconnectTimer = this.pollTimer = this.hourlyTimer = this.stableTimer = null;
   }
 
   private async connect(): Promise<void> {
@@ -69,9 +76,7 @@ export class HintConnection {
     } catch (e) {
       if (this.stopped) return;
       if (e instanceof AuthError) {
-        // The engine's own next call meets the same 401 and reports it.
-        this.stop();
-        this.o.check(false);
+        this.authFailed();
         return;
       }
       this.failed(e instanceof OfflineError);
@@ -79,11 +84,21 @@ export class HintConnection {
     }
     if (this.stopped) return;
 
-    const socket = this.o.open(this.o.wsUrl(ticket));
+    let socket: SocketLike;
+    try {
+      socket = this.o.open(this.o.wsUrl(ticket));
+    } catch {
+      this.failed(false);
+      return;
+    }
     this.socket = socket;
     socket.onopen = () => {
       if (socket !== this.socket) return;
-      this.failures = 0;
+      // Only a connection that stays up resets the backoff, so one that closes at once can't loop fast.
+      this.stableTimer = this.o.clock.setTimeout(() => {
+        this.stableTimer = null;
+        this.failures = 0;
+      }, STABLE_MS);
       this.stopPolling();
       this.o.onMode("live");
       // Whatever changed while there was no connection.
@@ -103,14 +118,24 @@ export class HintConnection {
     socket.onclose = (e) => {
       if (socket !== this.socket) return;
       this.socket = null;
+      if (this.stableTimer !== null) this.o.clock.clearTimeout(this.stableTimer);
+      this.stableTimer = null;
       if (this.stopped) return;
       if (e.code === CLOSE_KEY_REVOKED) {
-        this.stop();
-        this.o.check(false);
+        this.authFailed();
         return;
       }
       this.failed(false);
     };
+  }
+
+  /**
+   * The engine's own next call meets the same 401 and reports it (and the plugin stops the hints). If that call
+   * succeeds instead, the 401 was passing: try again at the polling pace.
+   */
+  private authFailed(): void {
+    this.o.check(false);
+    this.reconnectTimer = this.o.clock.setTimeout(() => void this.connect(), POLL_MS);
   }
 
   private failed(offline: boolean): void {
@@ -119,7 +144,8 @@ export class HintConnection {
     if (offline) this.o.onMode("offline");
     else if (this.failures >= POLL_AFTER_FAILURES) this.o.onMode("polling");
     const delay = Math.min(MAX_DELAY_MS, FIRST_DELAY_MS * 2 ** (this.failures - 1));
-    this.reconnectTimer = this.o.clock.setTimeout(() => void this.connect(), this.o.random() * delay);
+    // Equal jitter: spread out, but never sooner than half the delay.
+    this.reconnectTimer = this.o.clock.setTimeout(() => void this.connect(), delay / 2 + (this.o.random() * delay) / 2);
   }
 
   private startPolling(): void {

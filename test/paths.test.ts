@@ -2,7 +2,7 @@
 import { expect, test } from "vitest";
 import {
   conflictCopyPath, defaultDeviceName, eligibility, fromApiPath, isAllowedServerUrl, isValidDeviceName,
-  secretId, slug, toApiPath, urlFor,
+  secretId, serverProblem, slug, toApiPath, urlFor,
 } from "../src/engine/paths";
 
 test("api paths are NFC", () => {
@@ -32,8 +32,23 @@ test("slug", () => {
   expect(slug("  Work -- Notes! ")).toBe("work-notes");
 });
 test("secret ids are valid SecretStorage ids", () => {
-  expect(secretId("Work Notes", "Android-7Q")).toBe("kumbu-work-notes-android-7q");
-  expect(secretId("Büro", "Laptop")).toBe("kumbu-buro-laptop");
+  expect(secretId("Work Notes", "Android-7Q", "My vault")).toMatch(/^kumbu-work-notes-[0-9a-f]{6}-android-7q$/);
+  expect(secretId("Büro", "Laptop", "v")).toMatch(/^kumbu-buro-[0-9a-f]{6}-laptop$/);
+  expect(secretId("日本", "Laptop", "v")).toMatch(/^kumbu-[0-9a-f]{6}-laptop$/);
+});
+test("secret ids differ for names a slug would fold together", () => {
+  expect(secretId("Büro", "Laptop", "v")).not.toBe(secretId("Buro", "Laptop", "v"));
+  expect(secretId("Work", "Laptop", "v")).not.toBe(secretId("work", "Laptop", "v"));
+  expect(secretId("日本", "Laptop", "v")).not.toBe(secretId("中国", "Laptop", "v"));
+  // Two Obsidian vaults on one device paired with the same Kumbu² vault.
+  expect(secretId("Work", "Laptop", "Notes")).not.toBe(secretId("Work", "Laptop", "Other notes"));
+  expect(secretId("Work", "Laptop", "Notes")).toBe(secretId("Work", "Laptop", "Notes"));
+});
+test("a server url from data.json is checked before the key is sent", () => {
+  expect(serverProblem("https://kumbu.example.org")).toBeNull();
+  expect(serverProblem("http://localhost:8080")).toBeNull();
+  expect(serverProblem("http://kumbu.example.org")).toBe("The server URL must start with https:// (http:// only for localhost).");
+  expect(serverProblem("")).not.toBeNull();
 });
 test("server url rule", () => {
   expect(isAllowedServerUrl("https://kumbu.tidesson.net")).toBe(true);

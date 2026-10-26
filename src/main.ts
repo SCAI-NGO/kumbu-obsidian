@@ -3,7 +3,7 @@
 import { Notice, Platform, Plugin, TAbstractFile, TFile } from "obsidian";
 import { KumbuApi, redeemPairing, trimServer } from "./api/client";
 import { SyncEngine } from "./engine/engine";
-import { defaultDeviceName, secretId } from "./engine/paths";
+import { defaultDeviceName, secretId, serverProblem } from "./engine/paths";
 import { AuthError, OfflineError, type SyncState, type SyncStatus } from "./engine/ports";
 import { HintConnection, wsUrlFor } from "./live/hints";
 import { obsidianHttp } from "./obsidian/http";
@@ -81,6 +81,13 @@ export default class KumbuSyncPlugin extends Plugin {
       this.statusBar?.hide();
       return;
     }
+    // data.json can be edited by hand or synced from elsewhere: the key never goes to a plain-http server.
+    const problem = serverProblem(s.server);
+    if (problem !== null) {
+      new Notice(`Kumbu² Sync: ${problem}`);
+      this.statusBar?.hide();
+      return;
+    }
     const api = new KumbuApi(obsidianHttp, s.server, s.vault, key);
     const engine = this.buildEngine(api);
     this.api = api;
@@ -102,6 +109,11 @@ export default class KumbuSyncPlugin extends Plugin {
   /** Pairing: the code becomes a device key in SecretStorage, then the first sync runs. */
   async connectWithPairing(code: string): Promise<void> {
     const s = this.data.settings;
+    const problem = serverProblem(s.server);
+    if (problem !== null) {
+      new Notice(problem);
+      return;
+    }
     let paired;
     try {
       paired = await redeemPairing(obsidianHttp, s.server, code, s.device);
@@ -109,7 +121,7 @@ export default class KumbuSyncPlugin extends Plugin {
       new Notice(e instanceof Error ? e.message : "The server can't be reached.");
       return;
     }
-    const id = secretId(paired.vault, s.device);
+    const id = secretId(paired.vault, s.device, this.app.vault.getName());
     storeKey(this.app, id, paired.key);
     await this.connectTo(paired.vault, id, true);
   }

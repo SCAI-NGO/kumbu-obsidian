@@ -118,6 +118,13 @@ describe("remove", () => {
   });
 });
 
+test("a bare 409 on delete with the note still at the base is refused, not a conflict", async () => {
+  const http = fakeHttp({ status: 409, body: { error: "The note can't be trashed now." } }, { status: 200, body: { ...note, version: "aaaaaaaaaaaa" } });
+  const p = api(http).remove("a.md", "aaaaaaaaaaaa");
+  await expect(p).rejects.toBeInstanceOf(RejectedError);
+  await expect(p).rejects.toThrow("The note can't be trashed now.");
+});
+
 describe("move", () => {
   test("move always sends keepLinks true with API paths", async () => {
     const http = fakeHttp({ status: 200, body: { message: "moved", path: "/Work/b.md", version: "bbbbbbbbbbbb" } });

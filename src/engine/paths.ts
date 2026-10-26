@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Paths between the Obsidian vault and the server, and the names derived from them.
+import { versionOfSync } from "./version";
 
 /** "Besprechung März.md" → "/Work/Besprechung März.md", NFC (macOS and some Android file systems hand out NFD). */
 export function toApiPath(vault: string, path: string): string {
@@ -43,9 +44,14 @@ export function slug(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-/** SecretStorage ids must be lowercase alphanumerics and dashes. */
-export function secretId(vault: string, device: string): string {
-  return `kumbu-${slug(vault)}-${slug(device)}`;
+/**
+ * SecretStorage ids must be lowercase alphanumerics and dashes. SecretStorage is shared by every vault of the app,
+ * so a short hash of the exact Kumbu² vault name and the Obsidian vault's name keeps ids apart that the slug folds
+ * together ("Büro" and "Buro", names without Latin letters, two Obsidian vaults paired with one Kumbu² vault).
+ */
+export function secretId(vault: string, device: string, localVault: string): string {
+  const hash = versionOfSync(`${vault}\n${localVault}`).slice(0, 6);
+  return ["kumbu", slug(vault), hash, slug(device)].filter((part) => part !== "").join("-");
 }
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -70,4 +76,11 @@ export function isAllowedServerUrl(url: string): boolean {
   }
   if (parsed.protocol === "https:") return true;
   return parsed.protocol === "http:" && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1");
+}
+
+const URL_RULE = "The server URL must start with https:// (http:// only for localhost).";
+
+/** Null when a key may be sent to this server, else the sentence to show. */
+export function serverProblem(url: string): string | null {
+  return isAllowedServerUrl(url) ? null : URL_RULE;
 }
