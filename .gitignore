@@ -1,0 +1,20 @@
+# Dependencies and build output
+node_modules/
+main.js
+*.js.map
+coverage/
+
+# Environment
+.env
+.direnv/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Obsidian vault state (settings stay tracked)
+obisdian/.obsidian/workspace.json
+obisdian/.obsidian/workspace-mobile.json
+obisdian/.obsidian/cache
+obisdian/.trash/
