@@ -165,11 +165,13 @@ export class SyncEngine {
       if (base !== undefined && now === base && this.state.bases[tk] === undefined) {
         const moved = await this.o.remote.move(fk, tk);
         if (moved.ok) {
+          // A move takes whatever the note is now, so an agent's edit may have come along: the base stays what
+          // this device agreed on, and a different moved version is decided at once (downloaded, or a conflict).
           delete this.state.bases[fk];
-          this.state.bases[tk] = moved.version;
+          this.state.bases[tk] = base;
           this.dirty.delete(fk);
-          this.dirty.delete(tk);
           await this.save();
+          await this.syncPath(tk, moved.version, false);
           return;
         }
       }
@@ -506,16 +508,18 @@ export class SyncEngine {
     const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, at));
     if (!(await this.o.local.writeIf(copy, null, copyText))) return { remote };
     // The copy is safe on disk before the original is overwritten, so a failure from here on loses nothing.
-    if (!(await this.o.local.writeIf(path, local, note.content))) return { remote };
-    await this.setBase(key, note.version);
     const copyKey = keyOf(copy);
     this.localPathOf.set(copyKey, copy);
     this.conflicts.add(copyKey);
     this.dirty.add(copyKey);
     this.copiesMade++;
     this.o.onConflict(key, copyKey);
+    const replaced = await this.o.local.writeIf(path, local, note.content);
+    if (replaced) await this.setBase(key, note.version);
+    // Uploaded whatever happened to the original: it is a note of its own now.
     await this.syncPath(copyKey, null, false);
-    return undefined;
+    // The original changed again meanwhile (typed, deleted): decided once more, against the copy's text.
+    return replaced ? undefined : { remote: note.version };
   }
 
   private async freeCopyPath(candidate: string): Promise<string> {

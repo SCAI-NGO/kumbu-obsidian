@@ -30,14 +30,17 @@ export class FakeServer implements RemoteApi {
     await this.store(path, content, writer);
   }
 
-  /** An agent's edit (content) or delete (null), stamped with the clock. */
-  agentWrite(path: string, content: string | null): Promise<void> {
+  /**
+   * An agent's edit (content) or delete (null), stamped with the clock, or with `at` for a write stamped before it
+   * was committed (the case the server's 5-minute overlap is for).
+   */
+  agentWrite(path: string, content: string | null, at?: number): Promise<void> {
     if (content === null) {
       this.notes.delete(path);
-      this.touch(path);
+      this.touch(path, at);
       return Promise.resolve();
     }
-    return this.store(path, content, "agent");
+    return this.store(path, content, "agent", at);
   }
 
   /** Pauses the next call of that method until the returned function is called. */
@@ -115,14 +118,14 @@ export class FakeServer implements RemoteApi {
     return { ok: true, version: existing.version };
   }
 
-  private async store(path: string, content: string, writer: string): Promise<void> {
+  private async store(path: string, content: string, writer: string, at = this.now()): Promise<void> {
     const text = normaliseText(content);
-    this.notes.set(path, { content: text, lastWriter: writer, at: new Date(this.now()).toISOString(), version: await versionOf(text) });
-    this.touch(path);
+    this.notes.set(path, { content: text, lastWriter: writer, at: new Date(at).toISOString(), version: await versionOf(text) });
+    this.touch(path, at);
   }
 
-  private touch(path: string): void {
-    this.touches.push({ path, at: this.now() });
+  private touch(path: string, at = this.now()): void {
+    this.touches.push({ path, at });
   }
 
   private async enter(method: Method, args: unknown[]): Promise<void> {
