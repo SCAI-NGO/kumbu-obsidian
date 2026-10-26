@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // LocalFiles over Obsidian's Vault and FileManager.
-import { MarkdownView, Platform, TFile, type App } from "obsidian";
+import { MarkdownView, Platform, TFile, type App, type Editor } from "obsidian";
 import type { LocalFiles, Version } from "../engine/ports";
 import { versionOfSync } from "../engine/version";
 
@@ -20,7 +20,7 @@ export class VaultFiles implements LocalFiles {
     if (!file) return null;
     const view = this.editorsOf(file)[0];
     // Not cachedRead: a decision needs the text as it is now.
-    return view ? view.getViewData() : this.app.vault.read(file);
+    return view ? view.editor.getValue() : this.app.vault.read(file);
   }
 
   size(path: string): Promise<number | null> {
@@ -41,15 +41,22 @@ export class VaultFiles implements LocalFiles {
       }
     }
     if (expected === null) return false;
-    // Typing that is only in an editor must never be replaced: it counts like an edit on disk.
     const editors = this.editorsOf(file);
-    if (editors.some((view) => versionOfSync(view.getViewData()) !== expected)) return false;
-    // Flushed first, so the editor and the disk hold the same text when process checks and writes.
-    for (const view of editors) await view.save();
+    if (editors.length > 0) {
+      // Open in an editor: typing that isn't saved yet counts like an edit on disk. The check and the replacement
+      // happen in one synchronous step through the editor, so no keystroke can come between them; whatever is
+      // typed afterwards lands on top of the new text and is saved (and uploaded) as an edit of its own.
+      if (editors.some((view) => versionOfSync(view.editor.getValue()) !== expected)) return false;
+      // Views of one file share their text in Obsidian; the others follow the first.
+      for (const view of editors) if (view.editor.getValue() !== content) replaceText(view.editor, content);
+      await editors[0]!.save();
+      return true;
+    }
     let written = false;
-    // process reads and writes in one step, so the check and the write can't be split by a keystroke.
+    // process reads and writes in one step; the editors are asked again inside it, for a file opened meanwhile.
     await this.app.vault.process(file, (data) => {
       if (versionOfSync(data) !== expected) return data;
+      if (this.editorsOf(file).some((view) => versionOfSync(view.editor.getValue()) !== expected)) return data;
       written = true;
       return content;
     });
@@ -90,4 +97,13 @@ export class VaultFiles implements LocalFiles {
       if (!existing) await this.app.vault.createFolder(folder);
     }
   }
+}
+
+/** Replaces an editor's text, keeping the cursor and the scroll position as far as the new text allows. */
+function replaceText(editor: Editor, content: string): void {
+  const offset = editor.posToOffset(editor.getCursor());
+  const { top, left } = editor.getScrollInfo();
+  editor.setValue(content);
+  editor.setCursor(editor.offsetToPos(Math.min(offset, content.length)));
+  editor.scrollTo(left, top);
 }

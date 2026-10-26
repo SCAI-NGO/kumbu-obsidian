@@ -9,14 +9,48 @@ export class TAbstractFile { constructor(public path: string) {} }
 export class TFile extends TAbstractFile { stat = { size: 0 }; }
 export class TFolder extends TAbstractFile {}
 
-/** An open editor: `buffer` is what the user sees, `saved` is set once save() wrote it to disk. */
+/** The parts of Obsidian's Editor the adapter uses, over a view's buffer. */
+export class FakeEditor {
+  cursor = 0;
+  scroll = { top: 0, left: 0 };
+  sets = 0;
+  constructor(private readonly view: MarkdownView) {}
+  getValue(): string { return this.view.buffer; }
+  setValue(text: string): void { this.sets++; this.view.buffer = text; this.cursor = 0; this.scroll = { top: 0, left: 0 }; }
+  getCursor(): { line: number; ch: number } { return this.offsetToPos(this.cursor); }
+  setCursor(pos: { line: number; ch: number }): void { this.cursor = this.posToOffset(pos); }
+  posToOffset(pos: { line: number; ch: number }): number {
+    const lines = this.view.buffer.split("\n");
+    let offset = 0;
+    for (let i = 0; i < pos.line && i < lines.length; i++) offset += lines[i]!.length + 1;
+    return offset + pos.ch;
+  }
+  offsetToPos(offset: number): { line: number; ch: number } {
+    const before = this.view.buffer.slice(0, offset).split("\n");
+    return { line: before.length - 1, ch: before[before.length - 1]!.length };
+  }
+  getScrollInfo(): { top: number; left: number } { return this.scroll; }
+  scrollTo(x?: number | null, y?: number | null): void { this.scroll = { left: x ?? 0, top: y ?? 0 }; }
+}
+
+/**
+ * An open editor: `buffer` is what the user sees. save() is asynchronous like Obsidian's (a disk write): it takes
+ * the buffer when called, runs `whileSaving` (a keystroke in the gap), then writes what it took.
+ */
 export class MarkdownView {
   saves = 0;
-  constructor(public file: TFile | null, public buffer: string, private readonly onSave: (text: string) => void) {}
+  whileSaving: (() => void) | null = null;
+  readonly editor: FakeEditor;
+  constructor(public file: TFile | null, public buffer: string, private readonly onSave: (text: string) => void) {
+    this.editor = new FakeEditor(this);
+  }
   getViewData(): string { return this.buffer; }
-  save(): Promise<void> {
+  async save(): Promise<void> {
     this.saves++;
-    this.onSave(this.buffer);
-    return Promise.resolve();
+    const text = this.buffer;
+    await Promise.resolve();
+    this.whileSaving?.();
+    this.whileSaving = null;
+    this.onSave(text);
   }
 }

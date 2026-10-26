@@ -10,17 +10,24 @@ function fakeApp(disk: Record<string, string>) {
   const files = new Map(Object.entries(disk));
   const views: MarkdownView[] = [];
   const processed: string[] = [];
+  let whileProcessing: (() => void) | null = null;
   const app = {
     vault: {
       getFileByPath: (p: string) => (files.has(p) ? new TFile(p) : null),
       getAbstractFileByPath: (p: string) => (files.has(p) ? new TFile(p) : null),
       read: (f: TFile) => Promise.resolve(files.get(f.path)!),
-      process: (f: TFile, fn: (data: string) => string) => {
+      // Asynchronous like Obsidian's: it reads the file first, then runs the callback and writes in one step.
+      process: async (f: TFile, fn: (data: string) => string) => {
         processed.push(f.path);
-        const next = fn(files.get(f.path)!);
+        await Promise.resolve();
+        whileProcessing?.();
+        whileProcessing = null;
+        const data = files.get(f.path)!;
+        const next = fn(data);
         files.set(f.path, next);
-        for (const v of views) if (v.file?.path === f.path) v.buffer = next;
-        return Promise.resolve(next);
+        // Obsidian reloads an open editor from an external change.
+        if (next !== data) for (const v of views) if (v.file?.path === f.path) v.buffer = next;
+        return next;
       },
       create: (p: string, text: string) => {
         if (files.has(p)) return Promise.reject(new Error("File already exists."));
@@ -38,7 +45,8 @@ function fakeApp(disk: Record<string, string>) {
     views.push(view);
     return view;
   };
-  return { app: app as unknown as App, files, open, processed };
+  const duringProcess = (fn: () => void) => { whileProcessing = fn; };
+  return { app: app as unknown as App, files, open, processed, duringProcess };
 }
 
 test("read gives the text in an open editor, saved or not", async () => {
@@ -56,13 +64,41 @@ test("a write never replaces text that is only in an open editor", async () => {
   expect(f.files.get("a.md")).toBe("base");
 });
 
-test("an open editor that matches is saved first, then written", async () => {
+test("an open editor that matches is replaced through the editor and saved", async () => {
   const f = fakeApp({ "a.md": "base" });
   const view = f.open("a.md", "typed and matching");
   const files = new VaultFiles(f.app);
   expect(await files.writeIf("a.md", versionOfSync("typed and matching"), "agent text")).toBe(true);
-  expect(view.saves).toBe(1);
+  expect(view.buffer).toBe("agent text");
   expect(f.files.get("a.md")).toBe("agent text");
+});
+
+test("a keystroke while the editor is being saved is never overwritten", async () => {
+  const f = fakeApp({ "a.md": "base" });
+  const view = f.open("a.md", "base");
+  view.whileSaving = () => { view.buffer += " typed"; };
+  f.duringProcess(() => { view.buffer += " typed"; });
+  const files = new VaultFiles(f.app);
+  await files.writeIf("a.md", versionOfSync("base"), "agent text");
+  // Typed after the check: it stays in the editor, on top of whatever is there now.
+  expect(view.buffer).toContain(" typed");
+});
+
+test("the editor's cursor and scroll stay where they were, as far as the new text allows", async () => {
+  const f = fakeApp({ "a.md": "line one\nline two" });
+  const view = f.open("a.md", "line one\nline two");
+  view.editor.setCursor({ line: 1, ch: 4 });
+  view.editor.scrollTo(0, 120);
+  await new VaultFiles(f.app).writeIf("a.md", versionOfSync("line one\nline two"), "line one\nline 2 and more");
+  expect(view.editor.getCursor()).toEqual({ line: 1, ch: 4 });
+  expect(view.editor.getScrollInfo()).toEqual({ top: 120, left: 0 });
+});
+
+test("a file opened and typed in while it is written is not overwritten", async () => {
+  const f = fakeApp({ "a.md": "base" });
+  f.duringProcess(() => { f.open("a.md", "base and typing"); });
+  expect(await new VaultFiles(f.app).writeIf("a.md", versionOfSync("base"), "agent text")).toBe(false);
+  expect(f.files.get("a.md")).toBe("base");
 });
 
 test("a changed file on disk is not written", async () => {
