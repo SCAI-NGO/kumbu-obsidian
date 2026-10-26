@@ -2,10 +2,11 @@
 // The sync engine (spec §6): one serial queue per vault, every decision from local, remote and base versions.
 import { conflictCopyText } from "./conflict";
 import { decide, type Action } from "./decide";
+import { makePlan, type Choice, type FirstSyncSummary, type MergePlan } from "./firstSync";
 import { conflictCopyPath, eligibility } from "./paths";
 import {
   AuthError, OfflineError, RejectedError,
-  type Clock, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi, type StateStore,
+  type Clock, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi, type StateStore,
   type SyncState, type SyncStatus, type Version,
 } from "./ports";
 import { SerialQueue } from "./queue";
@@ -52,6 +53,7 @@ export class SyncEngine {
   private offline = false;
   private retryHandle: unknown = null;
   private retryDelay = 0;
+  private copiesMade = 0;
 
   constructor(o: EngineOptions) {
     this.o = o;
@@ -211,6 +213,29 @@ export class SyncEngine {
 
   private async runCheck(full: boolean): Promise<void> {
     const answer = await this.o.remote.versions(full ? null : this.state.cursor, null);
+    const { remote, keys } = await this.resolve(answer);
+    const damagedPossible = answer.full && answer.damaged > 0;
+    for (const key of keys) {
+      if (this.stopped) return;
+      const known = answer.full ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : (this.state.bases[key] ?? null);
+      await this.syncPath(key, known, damagedPossible);
+    }
+    await this.finishCheck(answer);
+  }
+
+  private async finishCheck(answer: VersionsAnswer): Promise<void> {
+    if (answer.full) {
+      this.damaged = answer.damaged;
+      this.state.lastFullAt = new Date(this.o.clock.now()).toISOString();
+    }
+    // Only after every path is done: a check that fails halfway asks again from the old cursor.
+    this.state.cursor = answer.cursor;
+    this.state.lastSyncAt = new Date(this.o.clock.now()).toISOString();
+    await this.save();
+  }
+
+  /** The answer's versions by key, without case clashes, and the keys a check decides, in order. */
+  private async resolve(answer: VersionsAnswer): Promise<{ remote: Map<string, Version | null>; keys: string[] }> {
     const isFull = answer.full;
     const caseInsensitive = this.o.local.caseInsensitive;
     const fold = (k: string) => (caseInsensitive ? k.toLowerCase() : k);
@@ -244,22 +269,117 @@ export class SyncEngine {
         if (!this.caseClashes.has(k)) keys.add(winner);
       }
     }
+    return { remote, keys: [...keys].sort(cmp) };
+  }
 
-    const damagedPossible = isFull && answer.damaged > 0;
-    for (const key of [...keys].sort(cmp)) {
-      if (this.stopped) return;
-      const known = isFull ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : (this.state.bases[key] ?? null);
-      await this.syncPath(key, known, damagedPossible);
+  /**
+   * Runs the first sync: merges both sides, asks `choose` once if paths differ. Null when the choice was cancelled
+   * (nothing saved). A failure stops the engine and is thrown; running it again finishes the job.
+   */
+  async firstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
+    this.state = await this.o.state.load();
+    this.stopped = false;
+    let summary: FirstSyncSummary | null = null;
+    let error: unknown = null;
+    await this.queue.push(async () => {
+      this.emit();
+      try {
+        summary = await this.runFirstSync(choose);
+        this.online();
+        if (summary === null) this.stopped = true;
+      } catch (e) {
+        error = e;
+        if (e instanceof AuthError) this.failed(e);
+        else {
+          // No retry on its own: a normal check would turn the pending choice into conflict copies.
+          this.offline = true;
+          this.stopped = true;
+        }
+      } finally {
+        this.emit();
+      }
+    }, "first-sync");
+    if (error !== null) throw error;
+    return summary;
+  }
+
+  private async runFirstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
+    const answer = await this.o.remote.versions(null, null);
+    const { remote, keys } = await this.resolve(answer);
+    const sides = new Map<string, { local: Version | null; remote: Version | null }>();
+    for (const key of keys) {
+      if (this.state.bases[key] !== undefined) continue;
+      const text = await this.o.local.read(this.localPathOf.get(key) ?? key);
+      sides.set(key, { local: text === null ? null : await versionOf(text), remote: remote.get(key) ?? null });
+    }
+    const plan = makePlan(sides, this.status().notSynced);
+    let choice: Choice = "both";
+    if (plan.differing.length > 0) {
+      const chosen = await choose(plan);
+      if (chosen === null) return null;
+      choice = chosen;
     }
 
-    if (isFull) {
-      this.damaged = answer.damaged;
-      this.state.lastFullAt = new Date(this.o.clock.now()).toISOString();
+    const counts = { uploaded: 0, downloaded: 0, unchanged: 0 };
+    const copiesBefore = this.copiesMade;
+    const upload = new Set(plan.toUpload);
+    const download = new Set(plan.toDownload);
+    const same = new Set(plan.same);
+    const differing = new Set(plan.differing);
+    const damagedPossible = answer.damaged > 0;
+    for (const key of keys) {
+      const remoteVersion = remote.get(key) ?? null;
+      if (upload.has(key)) {
+        await this.syncPath(key, null, false);
+        if (this.state.bases[key] !== undefined) counts.uploaded++;
+      } else if (download.has(key)) {
+        await this.syncPath(key, remoteVersion, false);
+        if (this.state.bases[key] !== undefined) counts.downloaded++;
+      } else if (same.has(key)) {
+        await this.setBase(key, remoteVersion!);
+        counts.unchanged++;
+      } else if (differing.has(key) && choice === "local") {
+        if (await this.keepLocal(key, remoteVersion!)) counts.uploaded++;
+      } else if (differing.has(key) && choice === "kumbu") {
+        if (await this.keepKumbu(key)) counts.downloaded++;
+      } else {
+        // Already synced in an earlier, interrupted run, or "Keep both": the normal decision (a conflict copy).
+        await this.syncPath(key, remoteVersion, damagedPossible);
+      }
     }
-    // Only after every path is done: a check that fails halfway asks again from the old cursor.
-    this.state.cursor = answer.cursor;
-    this.state.lastSyncAt = new Date(this.o.clock.now()).toISOString();
-    await this.save();
+    await this.finishCheck(answer);
+    return { ...counts, conflictCopies: this.copiesMade - copiesBefore, notSynced: this.status().notSynced };
+  }
+
+  /** The local text replaces Kumbu²'s, which stays in its history. False if it ended another way. */
+  private async keepLocal(key: string, remote: Version): Promise<boolean> {
+    const text = await this.o.local.read(this.localPathOf.get(key) ?? key);
+    if (text === null) {
+      await this.syncPath(key, remote, false);
+      return false;
+    }
+    const local = await versionOf(text);
+    const again = await this.upload(key, text, local, remote);
+    // The server changed since the list: decided as usual, which keeps both texts.
+    if (again !== undefined) await this.syncPath(key, again.remote, false);
+    return again === undefined && this.state.bases[key] === local;
+  }
+
+  /** Kumbu²'s text replaces the local file, which goes to Obsidian's .trash first. */
+  private async keepKumbu(key: string): Promise<boolean> {
+    const path = this.localPathOf.get(key) ?? key;
+    const note = await this.o.remote.read(key);
+    if (note === null) {
+      await this.syncPath(key, null, false);
+      return false;
+    }
+    await this.o.local.trashToLocal(path);
+    if (!(await this.o.local.writeIf(path, null, note.content))) {
+      await this.syncPath(key, note.version, false);
+      return false;
+    }
+    await this.setBase(key, note.version);
+    return true;
   }
 
   /** Lists the local files: spellings, attachments and conflict copies. Returns key → path of the syncable ones. */
@@ -393,6 +513,7 @@ export class SyncEngine {
     this.localPathOf.set(copyKey, copy);
     this.conflicts.add(copyKey);
     this.dirty.add(copyKey);
+    this.copiesMade++;
     this.o.onConflict(key, copyKey);
     await this.syncPath(copyKey, null, false);
     return undefined;
