@@ -149,9 +149,13 @@ export default class KumbuSyncPlugin extends Plugin {
   }
 
   async disconnect(): Promise<void> {
-    const ok = await new ConfirmModal(this.app, "Disconnect", "This stops syncing. Your files stay as they are.", "Disconnect").ask();
+    const paired = this.data.settings.ownsSecret;
+    const text = paired
+      ? "This stops syncing and revokes this device's key on the server. Your files stay as they are."
+      : "This stops syncing. Your files stay as they are, and so does your API key.";
+    const ok = await new ConfirmModal(this.app, "Disconnect", text, "Disconnect").ask();
     if (!ok) return;
-    await this.forgetConnection();
+    await this.forgetConnection({ revoke: true });
   }
 
   async saveAll(): Promise<void> {
@@ -185,9 +189,15 @@ export default class KumbuSyncPlugin extends Plugin {
     // onFirstSyncCancelled, both also when it happens on a retry.
   }
 
-  private async forgetConnection(): Promise<void> {
+  /**
+   * Stops syncing and forgets the vault. With `revoke`, a key this plugin got by pairing is revoked on the server first,
+   * so a device given away or lost keeps no key that works; a key the user typed in is theirs and stays. If the server
+   * can't revoke it, the connection is forgotten all the same and the user is told where to revoke it by hand.
+   */
+  private async forgetConnection({ revoke }: { revoke: boolean }): Promise<void> {
     await this.stopSync();
     const s = this.data.settings;
+    if (revoke && s.ownsSecret) await this.revokeKey(s.secretId);
     if (s.ownsSecret) forgetKey(this.app, s.secretId);
     s.vault = "";
     s.secretId = "";
@@ -196,6 +206,17 @@ export default class KumbuSyncPlugin extends Plugin {
     await this.saveAll();
     this.statusBar?.hide();
     this.tab?.refresh();
+  }
+
+  private async revokeKey(id: string): Promise<void> {
+    const key = readKey(this.app, id);
+    if (key === null) return;
+    try {
+      await new KumbuApi(obsidianHttp, this.data.settings.server, this.data.settings.vault, key).revokeSelf();
+    } catch (e) {
+      const why = e instanceof Error ? ` (${e.message})` : "";
+      new Notice(`Kumbu² Sync: this device's key could not be revoked on the server${why}, so it still works. Revoke it in the Kumbu² web app: Access, API keys.`, 0);
+    }
   }
 
   private openSettings(): void {
@@ -250,7 +271,8 @@ export default class KumbuSyncPlugin extends Plugin {
       onAuthLost: () => this.authLost(),
       onFirstSyncDone: (summary) => new ResultModal(this.app, this.data.settings.vault, summary).open(),
       // Cancelled: not connected, nothing kept but the server and the device name.
-      onFirstSyncCancelled: () => void this.forgetConnection(),
+      // The key was made for this sync only: revoked with it.
+      onFirstSyncCancelled: () => void this.forgetConnection({ revoke: true }),
     });
   }
 
@@ -261,7 +283,7 @@ export default class KumbuSyncPlugin extends Plugin {
 
   private authLost(): void {
     new Notice("Kumbu² Sync: this device's key no longer works (revoked, expired, or its vault was re-encrypted). Pair again in the settings.");
-    void this.forgetConnection();
+    void this.forgetConnection({ revoke: false });
   }
 
   private ifFile(file: TAbstractFile, then: (path: string) => void): void {
