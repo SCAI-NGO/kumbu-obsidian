@@ -35,7 +35,7 @@ If you already have an API key with write access to the vault, "I have an API ke
 
 **The status bar** shows `Kumbu² ● live` while the WebSocket is connected, `● polling` while it isn't (the plugin then checks every 2 minutes) and `○ offline` while the server can't be reached. It adds `· 3 not synced` when notes are left out. A click opens the settings. The command **Sync now** checks at once.
 
-**Disconnecting** (in the settings) stops syncing and forgets the key it stored when pairing. A key you picked yourself under "I have an API key already" stays in Obsidian's secret storage. Your files stay as they are. The device's key stays on the server until you revoke it in the web app's API keys page.
+**Disconnecting** (in the settings) stops syncing, revokes the device's key on the server and forgets it, so a device you give away or lose keeps no key that works; cancelling the first sync does the same. If the server can't be reached (or runs a Kumbu² older than 0.2.5), the plugin says so and the key stays valid until you revoke it in the web app's API keys page. A key you picked yourself under "I have an API key already" is yours: it is neither revoked nor removed, and stays in Obsidian's secret storage. Your files stay as they are.
 
 ## Where the key is kept
 

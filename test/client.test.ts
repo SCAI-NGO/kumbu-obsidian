@@ -174,6 +174,16 @@ describe("tickets and vaults", () => {
     expect(await api(http).wsTicket()).toBe("kumbu_wst_x");
     expect(http.last).toMatchObject({ method: "POST", url: "https://k.example/api/ws-ticket", headers: { Authorization: "Bearer kumbu_x" } });
   });
+  test("revokeSelf deletes the key it carries; a key refused already counts as revoked", async () => {
+    const http = fakeHttp({ status: 204 });
+    await api(http).revokeSelf();
+    expect(http.last).toMatchObject({ method: "DELETE", url: "https://k.example/api/key", headers: { Authorization: "Bearer kumbu_x" } });
+    await api(fakeHttp({ status: 401, body: { error: "revoked" } })).revokeSelf();
+  });
+  test("revokeSelf throws when the key may still work: offline, or a server without the endpoint", async () => {
+    await expect(api(fakeHttp(new Error("offline"))).revokeSelf()).rejects.toBeInstanceOf(OfflineError);
+    await expect(api(fakeHttp({ status: 404, body: { error: "Not found." } })).revokeSelf()).rejects.toBeInstanceOf(RejectedError);
+  });
   test("vaults lists names and write rights", async () => {
     const http = fakeHttp({ status: 200, body: [
       { name: "Work", notes: 1, embeddings: "internal", pending: false, canWrite: true },

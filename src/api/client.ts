@@ -96,6 +96,16 @@ export class KumbuApi implements RemoteApi {
     return parse<WsTicketView>(r).ticket;
   }
 
+  /**
+   * Revokes this key on the server (`DELETE /api/key`, Kumbu² 0.2.5 or newer). A key the server refuses already (401,
+   * 403) is as good as revoked; anything else, an older server's 404 included, throws, and the key may still work.
+   */
+  async revokeSelf(): Promise<void> {
+    const r = await this.send("DELETE", "/api/key");
+    if (r.status === 401 || r.status === 403) return;
+    expectOk(r);
+  }
+
   async vaults(): Promise<{ name: string; canWrite: boolean }[]> {
     const r = await this.send("GET", "/api/vaults");
     expectOk(r);
