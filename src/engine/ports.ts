@@ -2,14 +2,23 @@
 // The engine's ports and the types every part of the plugin shares.
 
 export type Version = string; // 12 hex chars
-export interface RemoteEntry { path: string; version: Version | null; } // vault-relative path; null = deleted
+/** What a path holds on a server with attachments; a server without them gives no kind. */
+export type FileKind = "note" | "image" | "pdf";
+export interface RemoteEntry { path: string; version: Version | null; kind?: FileKind; } // vault-relative path; null = deleted
 export interface VersionsAnswer {
   full: boolean; entries: RemoteEntry[]; cursor: string; state: string | null; damaged: number; unchanged: boolean;
+  /** The server keeps attachments: it lists them, and serves them through readFile, putFile and removeFile. */
+  attachments: boolean;
 }
 export interface RemoteNote { path: string; content: string; version: Version; lastWriter: string; lastWriteAt: string; }
 export type PutResult = { ok: true; version: Version } | { ok: false; conflict: { content: string; version: Version } };
 export type DeleteResult = { ok: true } | { ok: false; conflict: { content: string; version: Version } | null }; // null: already gone
 export type MoveResult = { ok: true; version: Version } | { ok: false };
+/** An attachment's bytes, exactly as stored, and their version. */
+export interface RemoteFile { bytes: ArrayBuffer; version: Version; }
+/** An attachment's conflict carries the version only: its bytes are read when needed. */
+export type FilePutResult = { ok: true; version: Version } | { ok: false; conflict: { version: Version } };
+export type FileDeleteResult = { ok: true } | { ok: false; conflict: { version: Version } | null }; // null: already gone
 
 /** 401: the key expired or was revoked. */
 export class AuthError extends Error {}
@@ -28,6 +37,10 @@ export interface RemoteApi {
   put(path: string, content: string, base: Version | null): Promise<PutResult>;
   remove(path: string, base: Version): Promise<DeleteResult>;
   move(from: string, to: string): Promise<MoveResult>; // keepLinks: true, always
+  /** Attachments (PDFs, images), only on a server whose versions answer says `attachments`. */
+  readFile(path: string): Promise<RemoteFile | null>;
+  putFile(path: string, bytes: ArrayBuffer, base: Version | null): Promise<FilePutResult>;
+  removeFile(path: string, base: Version): Promise<FileDeleteResult>;
 }
 
 export interface LocalFiles {
@@ -42,6 +55,10 @@ export interface LocalFiles {
    * version `expected` (null: the file must not exist). Returns false if it changed.
    */
   writeIf(path: string, expected: Version | null, content: string): Promise<boolean>;
+  /** The file's bytes as they are on disk (attachments), null if there is none. */
+  readBinary(path: string): Promise<ArrayBuffer | null>;
+  /** writeIf for bytes: writes only if the file's bytes still have version `expected` (null: it must not exist). */
+  writeBinaryIf(path: string, expected: Version | null, bytes: ArrayBuffer): Promise<boolean>;
   trashToLocal(path: string): Promise<void>; // Obsidian's .trash, always (first-sync "Keep Kumbu²")
   /**
    * Trashes by the user's trash setting (remote deletions), only if the text the user sees (as `read` gives it)

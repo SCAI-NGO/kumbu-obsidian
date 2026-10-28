@@ -2,18 +2,20 @@
 // The Kumbu² REST API over an injected HTTP function: requestUrl in Obsidian, fetch in Node.
 import {
   AuthError, OfflineError, RejectedError,
-  type DeleteResult, type MoveResult, type PutResult, type RemoteApi, type RemoteEntry, type RemoteNote,
-  type Version, type VersionsAnswer,
+  type DeleteResult, type FileDeleteResult, type FilePutResult, type MoveResult, type PutResult, type RemoteApi,
+  type RemoteEntry, type RemoteFile, type RemoteNote, type Version, type VersionsAnswer,
 } from "../engine/ports";
-import { fromApiPath, toApiPath, urlFor } from "../engine/paths";
-import { normaliseText } from "../engine/version";
+import { fileUrlFor, fromApiPath, toApiPath, urlFor } from "../engine/paths";
+import { normaliseText, versionOfBytes } from "../engine/version";
 import type {
-  ConflictView, ErrorView, MovedView, MoveRequest, NoteView, PutNoteRequest, RedeemRequest, RedeemView,
-  VaultView, VersionsView, WsTicketView,
+  ConflictView, ErrorView, FileConflictView, FileStateView, MovedView, MoveRequest, NoteView, PutNoteRequest,
+  RedeemRequest, RedeemView, VaultView, VersionsView, WsTicketView,
 } from "./types";
 
-export interface HttpRequest { method: string; url: string; headers: Record<string, string>; body?: string; }
-export interface HttpResponse { status: number; headers: Record<string, string>; text: string; }
+/** `body`: JSON text, or an attachment's bytes as they are. */
+export interface HttpRequest { method: string; url: string; headers: Record<string, string>; body?: string | ArrayBuffer; }
+/** `bytes`: the body as it came, for an attachment; `text` is the same body decoded. */
+export interface HttpResponse { status: number; headers: Record<string, string>; text: string; bytes?: ArrayBuffer; }
 /** Throws only on network failure; every status comes back as a response. */
 export type HttpFn = (r: HttpRequest) => Promise<HttpResponse>;
 
@@ -21,24 +23,36 @@ const WRONG_CODE = "This code is not valid (any more).";
 
 export class KumbuApi implements RemoteApi {
   private readonly server: string;
+  /** What the last versions answer said, for a 304, which says nothing. */
+  private attachments = false;
 
   constructor(private readonly http: HttpFn, server: string, private readonly vault: string, private readonly key: string) {
     this.server = trimServer(server);
   }
 
+  /**
+   * Asks with attachments=1: a server that keeps attachments then lists them, each entry with its kind, and says
+   * `attachments: true` (also for an empty vault); an older one ignores the parameter and answers as it always has.
+   */
   async versions(since: string | null, state: string | null): Promise<VersionsAnswer> {
-    const query = since === null ? "" : `?since=${encodeURIComponent(since)}`;
+    const query = "?attachments=1" + (since === null ? "" : `&since=${encodeURIComponent(since)}`);
     const headers: Record<string, string> = {};
     // The server answers 304 only to a full list, so the tag goes only with one.
     if (since === null && state !== null) headers["If-None-Match"] = `"${state}"`;
     const r = await this.send("GET", `/api/vaults/${encodeURIComponent(this.vault)}/versions${query}`, undefined, headers);
-    if (r.status === 304) return { full: true, entries: [], cursor: "", state, damaged: 0, unchanged: true };
+    if (r.status === 304) return { full: true, entries: [], cursor: "", state, damaged: 0, unchanged: true, attachments: this.attachments };
     if (r.status === 404) throw new AuthError(errorOf(r) ?? `This key can't open the vault ${this.vault} any more.`);
     expectOk(r);
     const view = parse<VersionsView>(r);
-    const entries: RemoteEntry[] = view.notes.map((n) => ({ path: fromApiPath(this.vault, n.path), version: n.version }));
+    this.attachments = view.attachments === true;
+    const entries: RemoteEntry[] = view.notes.map((n) => ({
+      path: fromApiPath(this.vault, n.path), version: n.version, ...(n.kind === undefined ? {} : { kind: n.kind }),
+    }));
     if (!view.full) for (const p of view.deleted ?? []) entries.push({ path: fromApiPath(this.vault, p), version: null });
-    return { full: view.full, entries, cursor: view.cursor, state: view.state, damaged: view.damaged, unchanged: false };
+    return {
+      full: view.full, entries, cursor: view.cursor, state: view.state, damaged: view.damaged, unchanged: false,
+      attachments: this.attachments,
+    };
   }
 
   async read(path: string): Promise<RemoteNote | null> {
@@ -90,6 +104,51 @@ export class KumbuApi implements RemoteApi {
     return view.version ? { ok: true, version: view.version } : { ok: false };
   }
 
+  /** An attachment's bytes as stored; its version is the ETag (the token of those bytes). */
+  async readFile(path: string): Promise<RemoteFile | null> {
+    const r = await this.send("GET", fileUrlFor(this.vault, path));
+    if (r.status === 404) return null;
+    expectOk(r);
+    // Never an empty file in place of a body the HTTP function couldn't hand over.
+    if (r.bytes === undefined) throw new OfflineError("The server's answer came without the file's bytes.");
+    const tag = header(r, "ETag")?.replace(/^W\//, "").replace(/"/g, "");
+    return { bytes: r.bytes, version: tag || (await versionOfBytes(r.bytes)) };
+  }
+
+  /** Uploads the bytes as they are: created without a base, else only over that version (409: a conflict). */
+  async putFile(path: string, bytes: ArrayBuffer, base: Version | null): Promise<FilePutResult> {
+    const query = base === null ? "" : `?version=${encodeURIComponent(base)}`;
+    const r = await this.sendBytes("PUT", fileUrlFor(this.vault, path) + query, bytes);
+    if (r.status === 409) {
+      const conflict = await this.fileConflictOf(r, path);
+      if (conflict) return { ok: false, conflict };
+      // Gone meanwhile: the local file wins and is uploaded anew, as a note is.
+      if (base !== null) return this.putFile(path, bytes, null);
+      throw new OfflineError(errorOf(r) ?? "The server refused the upload and the file isn't there; trying again later.");
+    }
+    if (r.status === 404) {
+      if (base !== null) return this.putFile(path, bytes, null);
+      // Not AuthError, as a note's create: a server without attachments answers 404 here too, and a key that lost
+      // the vault is told so by the next versions.
+      throw new RejectedError(errorOf(r) ?? "This server keeps no attachments.", 404);
+    }
+    expectOk(r);
+    return { ok: true, version: parse<FileStateView>(r).version };
+  }
+
+  async removeFile(path: string, base: Version): Promise<FileDeleteResult> {
+    const r = await this.send("DELETE", `${fileUrlFor(this.vault, path)}?version=${encodeURIComponent(base)}`);
+    if (r.status === 404) return { ok: false, conflict: null };
+    if (r.status === 409) {
+      const conflict = await this.fileConflictOf(r, path);
+      // Still at the version sent: the server refused the delete itself.
+      if (conflict?.version === base) throw new RejectedError(errorOf(r) ?? "The server refused to trash this file.");
+      return { ok: false, conflict };
+    }
+    expectOk(r);
+    return { ok: true };
+  }
+
   async wsTicket(): Promise<string> {
     const r = await this.send("POST", "/api/ws-ticket");
     expectOk(r);
@@ -120,9 +179,23 @@ export class KumbuApi implements RemoteApi {
     return now ? { content: now.content, version: now.version } : null;
   }
 
+  /** The current file's version of a 409: from its body, or read when the body has none. */
+  private async fileConflictOf(r: HttpResponse, path: string): Promise<{ version: Version } | null> {
+    const view = tryParse<FileConflictView>(r);
+    if (view?.current) return { version: view.current.version };
+    const now = await this.readFile(path);
+    return now ? { version: now.version } : null;
+  }
+
   private send(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<HttpResponse> {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.key}`, ...extra };
     return call(this.http, { method, url: this.server + path, headers }, body);
+  }
+
+  /** The body as it is: the server reads the format from the bytes and ignores the Content-Type. */
+  private sendBytes(method: string, path: string, bytes: ArrayBuffer): Promise<HttpResponse> {
+    const headers = { Authorization: `Bearer ${this.key}`, "Content-Type": "application/octet-stream" };
+    return call(this.http, { method, url: this.server + path, headers, body: bytes });
   }
 }
 

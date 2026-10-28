@@ -16,8 +16,17 @@ export function fromApiPath(vault: string, apiPath: string): string {
 
 /** The note's REST URL path, each segment encoded like the web app's noteUrl. */
 export function urlFor(vault: string, path: string): string {
+  return apiUrl("notes", vault, path);
+}
+
+/** The attachment's REST URL path (GET/PUT/DELETE /api/files), encoded as a note's. */
+export function fileUrlFor(vault: string, path: string): string {
+  return apiUrl("files", vault, path);
+}
+
+function apiUrl(api: "notes" | "files", vault: string, path: string): string {
   const segments = [vault, ...path.normalize("NFC").split("/")];
-  return "/api/notes/" + segments.map(encodeURIComponent).join("/");
+  return `/api/${api}/` + segments.map(encodeURIComponent).join("/");
 }
 
 export function eligibility(path: string): "sync" | "attachment" | "ignored" {

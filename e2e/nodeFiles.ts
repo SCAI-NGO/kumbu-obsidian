@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync
 import { readFile } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import type { LocalFiles, Version } from "../src/engine/ports";
-import { versionOfSync } from "../src/engine/version";
+import { versionOfBytes, versionOfSync } from "../src/engine/version";
 
 export class NodeFiles implements LocalFiles {
   readonly caseInsensitive = false;
@@ -80,6 +80,25 @@ export class NodeFiles implements LocalFiles {
     if (version !== expected) return Promise.resolve(false);
     this.write(path, content);
     return Promise.resolve(true);
+  }
+
+  readBinary(path: string): Promise<ArrayBuffer | null> {
+    try {
+      return Promise.resolve(new Uint8Array(readFileSync(this.abs(path))).buffer);
+    } catch {
+      return Promise.resolve(null);
+    }
+  }
+
+  async writeBinaryIf(path: string, expected: Version | null, bytes: ArrayBuffer): Promise<boolean> {
+    const now = await this.readBinary(path);
+    if ((now === null ? null : await versionOfBytes(now)) !== expected) return false;
+    const file = this.abs(path);
+    mkdirSync(dirname(file), { recursive: true });
+    const temp = join(dirname(file), `.kumbu-e2e-${process.pid}.tmp`);
+    writeFileSync(temp, new Uint8Array(bytes));
+    renameSync(temp, file);
+    return true;
   }
 
   trashToLocal(path: string): Promise<void> {

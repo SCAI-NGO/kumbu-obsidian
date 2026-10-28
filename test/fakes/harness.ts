@@ -33,11 +33,16 @@ export interface Harness {
 export async function harness(o: {
   synced?: Record<string, string>; localOnly?: Record<string, string>; remoteOnly?: Record<string, string>;
   caseInsensitive?: boolean; start?: boolean;
+  /** Attachments on the server only. */
+  remoteFiles?: Record<string, Uint8Array>;
+  /** A server from before attachments. */
+  oldServer?: boolean;
 } = {}): Promise<Harness> {
   vi.useFakeTimers({ now: new Date(2026, 9, 27, 10, 15), toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   const server = new FakeServer(() => Date.now());
   const files = new FakeFiles();
   files.caseInsensitive = o.caseInsensitive ?? false;
+  server.attachmentsSupported = o.oldServer !== true;
   const bases: Record<string, string> = {};
   for (const [p, t] of Object.entries(o.synced ?? {})) {
     await server.seed(p, t);
@@ -46,6 +51,7 @@ export async function harness(o: {
   }
   for (const [p, t] of Object.entries(o.localOnly ?? {})) files.files.set(p, t);
   for (const [p, t] of Object.entries(o.remoteOnly ?? {})) await server.seed(p, t);
+  for (const [p, b] of Object.entries(o.remoteFiles ?? {})) await server.seedFile(p, b);
   const state = new MemoryState({ bases, cursor: null, lastFullAt: null, lastSyncAt: null });
   const h: Harness = { engine: undefined as unknown as SyncEngine, server, files, state, conflicts: [], authLost: 0, statuses: [], firstSyncsDone: [], cancelled: 0 };
   h.engine = new SyncEngine({

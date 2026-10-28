@@ -26,6 +26,16 @@ test("an empty body (204, 304) is read as empty text", async () => {
   expect(await obsidianHttp({ method: "DELETE", url: "https://k.example/x", headers: {} })).toEqual({ status: 204, headers: {}, text: "" });
 });
 
+test("obsidianHttp sends an ArrayBuffer body as it is and returns the answer's bytes", async () => {
+  const sent = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x0d, 0x0a]).buffer;
+  const answer = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]).buffer;
+  requestUrl.mockResolvedValue({ status: 200, headers: { etag: '"aaaaaaaaaaaa"' }, arrayBuffer: answer, text: "\u0089PNG" });
+  const r = await obsidianHttp({ method: "PUT", url: "https://k.example/api/files/Work/a.pdf",
+    headers: { Authorization: "Bearer k", "Content-Type": "application/octet-stream" }, body: sent });
+  expect(requestUrl).toHaveBeenCalledWith(expect.objectContaining({ body: sent, contentType: "application/octet-stream" }));
+  expect(r.bytes).toBe(answer);
+});
+
 test("a thrown requestUrl becomes OfflineError", async () => {
   requestUrl.mockRejectedValue(new Error("net::ERR_INTERNET_DISCONNECTED"));
   await expect(obsidianHttp({ method: "GET", url: "https://k.example/x", headers: {} })).rejects.toBeInstanceOf(OfflineError);

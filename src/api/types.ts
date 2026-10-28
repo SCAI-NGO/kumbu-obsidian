@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Every request and response shape of the Kumbu² server the plugin uses, and nowhere else.
 // Source: the API contract in kumbukumbu's docs/superpowers/plans/2026-10-26-obsidian-sync-server.md
-// and src/Kumbu.Server/Api/NoteApi.cs. Paths are vault-tree paths ("/Work/plan.md").
+// and src/Kumbu.Server/Api/NoteApi.cs, FileApi.cs and SyncApi.cs. Paths are vault-tree paths ("/Work/plan.md").
 
 export interface ErrorView { error: string; }
 
-/** GET /api/vaults/{vault}/versions[?since=] (ETag "<state>"; 304 for If-None-Match without since). */
+/** GET /api/vaults/{vault}/versions[?attachments=1][&since=] (ETag "<state>"; 304 for If-None-Match without since). */
 export interface VersionsView {
   full: boolean;
   cursor: string;
   state: string;
   damaged: number;
-  notes: { path: string; version: string }[];
-  /** Only when full is false: touched paths with no note now. */
+  /** With attachments=1, attachments too, and every entry with its kind. */
+  notes: VersionEntry[];
+  /** Only when full is false: touched paths with no note (or attachment) now. */
   deleted?: string[];
+  /** True when asked with attachments=1 of a server that keeps attachments; absent from an older server. */
+  attachments?: boolean;
 }
+export interface VersionEntry { path: string; version: string; kind?: "note" | "image" | "pdf"; }
 
 /** GET/PUT /api/notes/{vault}/{path}. */
 export interface NoteView {
@@ -33,6 +37,21 @@ export interface PutNoteRequest { content: string; version?: string; }
 
 /** 409 on PUT and DELETE. */
 export interface ConflictView { error: string; current?: { content: string; version: string }; }
+
+/** PUT /api/files/{vault}/{path}[?version=] (raw body, 200/201), and in a 409 as `current`. GET answers bytes, ETag = version. */
+export interface FileStateView {
+  path: string;
+  mediaType: string;
+  size: number;
+  width: number | null;
+  height: number | null;
+  version: string;
+  writtenAt: string;
+  writtenBy: string;
+}
+
+/** 409 on PUT and DELETE /api/files: the file as it is now, without its bytes. */
+export interface FileConflictView { error: string; current?: FileStateView; }
 
 /** POST /api/move. */
 export interface MoveRequest { from: string; to: string; keepLinks: boolean; }

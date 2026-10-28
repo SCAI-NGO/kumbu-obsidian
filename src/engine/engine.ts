@@ -54,6 +54,7 @@ export class SyncEngine {
   private readonly rejected = new Map<string, { version: Version; detail: string }>();
   private caseClashes = new Map<string, string>();
   private damaged = 0;
+  private supportsAttachments = false;
   private readonly conflicts = new Set<string>();
   private connection: ConnectionMode = "polling";
   private offline = false;
@@ -91,6 +92,11 @@ export class SyncEngine {
 
   idle(): Promise<void> {
     return this.queue.idle();
+  }
+
+  /** The server keeps attachments, as its last versions answer said; false until one has come. */
+  get attachmentsSupported(): boolean {
+    return this.supportsAttachments;
   }
 
   /** The hint connection's mode; the engine shows "offline" over it while the server can't be reached. */
@@ -275,6 +281,7 @@ export class SyncEngine {
   /** The answer's versions by key, without case clashes, and the keys a check decides, in order. */
   private async resolve(answer: VersionsAnswer): Promise<{ remote: Map<string, Version | null>; keys: string[] }> {
     const isFull = answer.full;
+    this.supportsAttachments = answer.attachments;
     const caseInsensitive = this.o.local.caseInsensitive;
     const fold = (k: string) => (caseInsensitive ? k.toLowerCase() : k);
 
@@ -285,7 +292,11 @@ export class SyncEngine {
     const owner = new Map<string, string>();
     for (const k of Object.keys(this.state.bases)) owner.set(fold(k), k);
     const remote = new Map<string, Version | null>();
-    const entries = answer.entries.map((e) => ({ key: keyOf(e.path), version: e.version })).sort((a, b) => cmp(a.key, b.key));
+    // Notes only: attachments a server lists stay with it until the engine syncs them.
+    const entries = answer.entries
+      .filter((e) => e.kind === undefined || e.kind === "note")
+      .map((e) => ({ key: keyOf(e.path), version: e.version }))
+      .sort((a, b) => cmp(a.key, b.key));
     for (const { key, version } of entries) {
       const winner = owner.get(fold(key));
       if (caseInsensitive && winner !== undefined && winner !== key) {

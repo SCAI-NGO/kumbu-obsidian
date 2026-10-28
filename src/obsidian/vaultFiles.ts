@@ -2,7 +2,7 @@
 // LocalFiles over Obsidian's Vault and FileManager.
 import { MarkdownView, Platform, TFile, type App, type Editor } from "obsidian";
 import type { LocalFiles, Version } from "../engine/ports";
-import { versionOfSync } from "../engine/version";
+import { versionOfBytes, versionOfSync } from "../engine/version";
 
 export class VaultFiles implements LocalFiles {
   /** Where "Plan.md" and "plan.md" are one file: macOS, Windows and the phones; Linux keeps them apart. */
@@ -61,6 +61,34 @@ export class VaultFiles implements LocalFiles {
       return content;
     });
     return written;
+  }
+
+  async readBinary(path: string): Promise<ArrayBuffer | null> {
+    const file = this.app.vault.getFileByPath(path);
+    return file ? this.app.vault.readBinary(file) : null;
+  }
+
+  /**
+   * An attachment has no editor and Vault has no `process` for bytes, so the check reads the file right before the
+   * write: only another program writing the same file in that moment could come between them.
+   */
+  async writeBinaryIf(path: string, expected: Version | null, bytes: ArrayBuffer): Promise<boolean> {
+    const file = this.app.vault.getFileByPath(path);
+    if (!file) {
+      if (expected !== null) return false;
+      await this.ensureFolder(path);
+      try {
+        await this.app.vault.createBinary(path, bytes);
+        return true;
+      } catch {
+        // Created by someone else between the check and the create.
+        return false;
+      }
+    }
+    if (expected === null) return false;
+    if ((await versionOfBytes(await this.app.vault.readBinary(file))) !== expected) return false;
+    await this.app.vault.modifyBinary(file, bytes);
+    return true;
   }
 
   async trashToLocal(path: string): Promise<void> {

@@ -16,6 +16,8 @@ function fakeHttp(...replies: (Reply | Error)[]): HttpFn & { last: HttpRequest |
   fn.calls = calls;
   return fn;
 }
+/** A JSON request body; an attachment upload sends bytes instead. */
+const jsonOf = (r: HttpRequest | undefined): unknown => JSON.parse(r!.body as string);
 const api = (http: HttpFn) => new KumbuApi(http, "https://k.example/", "Work", "kumbu_x");
 const note = { path: "/Work/a b.md", content: "text", version: "cccccccccccc", lastWriter: "liz", lastWriteAt: "2026-10-27T10:00:00Z", current: true, lastWriterKind: null };
 
@@ -30,18 +32,18 @@ describe("put", () => {
   test("a create sends no version and returns the new version", async () => {
     const http = fakeHttp({ status: 201, body: note });
     expect(await api(http).put("a b.md", "text", null)).toEqual({ ok: true, version: "cccccccccccc" });
-    expect(JSON.parse(http.last!.body!)).toEqual({ content: "text" });
+    expect(jsonOf(http.last)).toEqual({ content: "text" });
   });
   test("a 409 whose note is gone meanwhile becomes a create", async () => {
     const http = fakeHttp({ status: 409, body: { error: "changed" } }, { status: 404, body: { error: "gone" } }, { status: 201, body: note });
     expect(await api(http).put("a.md", "text", "bbbbbbbbbbbb")).toEqual({ ok: true, version: "cccccccccccc" });
-    expect(JSON.parse(http.last!.body!)).toEqual({ content: "text" });
+    expect(jsonOf(http.last)).toEqual({ content: "text" });
   });
   test("a 404 on a put with a base means the note is gone: it becomes a create", async () => {
     const http = fakeHttp({ status: 404, body: { error: "No note /Work/a.md." } }, { status: 201, body: note });
     expect(await api(http).put("a.md", "text", "bbbbbbbbbbbb")).toEqual({ ok: true, version: "cccccccccccc" });
     expect(http.calls).toHaveLength(2);
-    expect(JSON.parse(http.last!.body!)).toEqual({ content: "text" });
+    expect(jsonOf(http.last)).toEqual({ content: "text" });
   });
   test("a 404 on a create means the key lost the vault", async () => {
     await expect(api(fakeHttp({ status: 404, body: { error: "No vault Work." } })).put("a.md", "text", null)).rejects.toBeInstanceOf(AuthError);
@@ -49,7 +51,7 @@ describe("put", () => {
   test("uploads send the LF text", async () => {
     const http = fakeHttp({ status: 200, body: note });
     await api(http).put("a.md", "a\r\nb", "bbbbbbbbbbbb");
-    expect((JSON.parse(http.last!.body!) as { content: string }).content).toBe("a\nb");
+    expect((jsonOf(http.last) as { content: string }).content).toBe("a\nb");
   });
 });
 
@@ -59,15 +61,15 @@ describe("versions", () => {
       full: false, cursor: "c2", state: "s1", damaged: 0,
       notes: [{ path: "/Work/x/b.md", version: "bbbbbbbbbbbb" }], deleted: ["/Work/a.md"] } });
     expect(await api(http).versions("c1", null)).toEqual({
-      full: false, cursor: "c2", state: "s1", damaged: 0, unchanged: false,
+      full: false, cursor: "c2", state: "s1", damaged: 0, unchanged: false, attachments: false,
       entries: [{ path: "x/b.md", version: "bbbbbbbbbbbb" }, { path: "a.md", version: null }] });
-    expect(http.last!.url).toBe("https://k.example/api/vaults/Work/versions?since=c1");
+    expect(http.last!.url).toBe("https://k.example/api/vaults/Work/versions?attachments=1&since=c1");
     expect(http.last!.headers["If-None-Match"]).toBeUndefined();
   });
   test("a full answer without deleted has entries for its notes only", async () => {
     const http = fakeHttp({ status: 200, body: { full: true, cursor: "c", state: "s", damaged: 2, notes: [{ path: "/Work/a.md", version: "aaaaaaaaaaaa" }] } });
     expect(await api(http).versions(null, null)).toMatchObject({ full: true, damaged: 2, entries: [{ path: "a.md", version: "aaaaaaaaaaaa" }] });
-    expect(http.last!.url).toBe("https://k.example/api/vaults/Work/versions");
+    expect(http.last!.url).toBe("https://k.example/api/vaults/Work/versions?attachments=1");
   });
   test("versions sends If-None-Match and reads 304 as unchanged", async () => {
     const http = fakeHttp({ status: 304 });
@@ -83,7 +85,7 @@ describe("versions", () => {
   test("a vault encoded in the url", async () => {
     const http = fakeHttp({ status: 200, body: { full: true, cursor: "c", state: "s", damaged: 0, notes: [] } });
     await new KumbuApi(http, "https://k.example", "My Work", "k").versions(null, null);
-    expect(http.last!.url).toBe("https://k.example/api/vaults/My%20Work/versions");
+    expect(http.last!.url).toBe("https://k.example/api/vaults/My%20Work/versions?attachments=1");
   });
   test("404 on versions means the key lost the vault", async () => {
     await expect(api(fakeHttp({ status: 404, body: { error: "No vault Work." } })).versions(null, null)).rejects.toBeInstanceOf(AuthError);
@@ -130,7 +132,7 @@ describe("move", () => {
     const http = fakeHttp({ status: 200, body: { message: "moved", path: "/Work/b.md", version: "bbbbbbbbbbbb" } });
     expect(await api(http).move("a.md", "b.md")).toEqual({ ok: true, version: "bbbbbbbbbbbb" });
     expect(http.last).toMatchObject({ method: "POST", url: "https://k.example/api/move" });
-    expect(JSON.parse(http.last!.body!)).toEqual({ from: "/Work/a.md", to: "/Work/b.md", keepLinks: true });
+    expect(jsonOf(http.last)).toEqual({ from: "/Work/a.md", to: "/Work/b.md", keepLinks: true });
   });
   test("move maps 409 and 404 to not moved", async () => {
     expect(await api(fakeHttp({ status: 409, body: { error: "exists" } })).move("a.md", "b.md")).toEqual({ ok: false });
@@ -202,7 +204,7 @@ describe("pairing", () => {
     expect(await redeemPairing(http, "https://k.example/", "k7qm-4xda", "Laptop")).toEqual({ key: "kumbu_k", vault: "Work", keyName: "Work – Obsidian Laptop" });
     expect(http.last).toMatchObject({ method: "POST", url: "https://k.example/api/pairing/redeem" });
     expect(http.last!.headers.Authorization).toBeUndefined();
-    expect(JSON.parse(http.last!.body!)).toEqual({ code: "K7QM4XDA", device: "Laptop" });
+    expect(jsonOf(http.last)).toEqual({ code: "K7QM4XDA", device: "Laptop" });
   });
   test("a wrong code says the server's sentence", async () => {
     const p = redeemPairing(fakeHttp({ status: 404, body: { error: "This pairing code is not valid (any more)." } }), "https://k.example", "x", "L");

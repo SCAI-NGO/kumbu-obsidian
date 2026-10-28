@@ -87,7 +87,8 @@ const nodeHttp: HttpFn = async (r) => {
   }
   const headers: Record<string, string> = {};
   response.headers.forEach((v, k) => { headers[k] = v; });
-  return { status: response.status, headers, text: await response.text() };
+  const bytes = await response.arrayBuffer();
+  return { status: response.status, headers, text: new TextDecoder().decode(bytes), bytes };
 };
 
 const clock: Clock = {
@@ -128,6 +129,9 @@ function recording(api: KumbuApi): RemoteApi {
     },
     remove: async (path, base) => { const r = await api.remove(path, base); note(path); return r; },
     move: async (from, to) => { const r = await api.move(from, to); note(from, to); return r; },
+    readFile: (path) => api.readFile(path),
+    putFile: async (path, bytes, base) => { const r = await api.putFile(path, bytes, base); note(path); return r; },
+    removeFile: async (path, base) => { const r = await api.removeFile(path, base); note(path); return r; },
   };
 }
 
@@ -135,7 +139,7 @@ async function remoteNotes(api: KumbuApi): Promise<Map<string, string>> {
   const answer = await api.versions(null, null);
   const notes = new Map<string, string>();
   for (const e of answer.entries) {
-    if (e.version === null) continue;
+    if (e.version === null || (e.kind !== undefined && e.kind !== "note")) continue;
     const note = await api.read(e.path);
     if (note !== null) notes.set(e.path, note.content);
   }
