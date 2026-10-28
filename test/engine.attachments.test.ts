@@ -134,6 +134,16 @@ describe("attachments sync both ways", () => {
     expect(h.engine.status().notSynced).toEqual([]);
   });
 
+  test("an attachment moved in Kumbu² is trashed at its old path and downloaded at the new one", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    expect((await h.server.move("x.png", "img/y.png")).ok).toBe(true);
+    await h.engine.check(false);
+    expect(h.files.systemTrash).toEqual(["x.png"]);
+    expect(bytesOf(h, "img/y.png")).toEqual(png(1));
+    expect(h.state.state.bases).toEqual({ "a.md": expect.any(String) as string, "img/y.png": await versionOfBytes(png(1)) });
+  });
+
   test("an nfd file name syncs as its nfc spelling", async () => {
     const nfd = "Bespréchung.png";
     const nfc = "Besprechung.png".replace("ec", "éc");
@@ -170,6 +180,47 @@ describe("limits and what stays on the list", () => {
     expect(h.engine.status().notSynced).toEqual([{ path: "scans/big.pdf", reason: "too-large" }]);
     expect(notices).toEqual(["Kumbu² Sync: scans/big.pdf isn't synced. Larger than 15 MB, the limit for PDFs."]);
     expect(announced).toEqual(["scans/big.pdf"]);
+  });
+
+  test("several files too large in one sync share one notice", async () => {
+    const h = await harness({ start: false, synced: { "a.md": "one" } });
+    for (const p of ["a.pdf", "b.png", "c.pdf"]) h.files.binaries.set(p, pdf(MAX_ATTACHMENT_BYTES + 1));
+    await h.engine.start();
+    const sizeOf = (p: string) => h.files.binaries.get(p)?.byteLength ?? null;
+    const step = announce([], h.engine.status().notSynced, sizeOf);
+    expect(step.notices).toEqual(["Kumbu² Sync: 3 files are too large to sync. The settings list them under “Not synced”, with what to do."]);
+    expect(step.announced).toEqual(["a.pdf", "b.png", "c.pdf"]);
+    expect(announce(step.announced, h.engine.status().notSynced, sizeOf).notices).toEqual([]);
+  });
+
+  test("a file too large is never read: not by a first sync, nor when renamed", async () => {
+    const h = await harness({ start: false, localOnly: { "a.md": "a" } });
+    h.files.binaries.set("big.pdf", pdf(MAX_ATTACHMENT_BYTES + 1));
+    const reads = vi.spyOn(h.files, "readBinary");
+    const summary = await h.engine.firstSync(() => Promise.resolve("both"));
+    expect(summary).toMatchObject({ uploaded: 1, notSynced: [{ path: "big.pdf", reason: "too-large" }] });
+    h.files.userRename("big.pdf", "scans/big.pdf");
+    h.engine.localRenamed("big.pdf", "scans/big.pdf");
+    await settle(h);
+    // Asked for at most where nothing is any more (the old path after the rename), never for the bytes.
+    const results = await Promise.all(reads.mock.results.map((r) => r.value as Promise<ArrayBuffer | null>));
+    expect(results.filter((r) => r !== null)).toEqual([]);
+    expect(h.engine.status().notSynced).toEqual([{ path: "scans/big.pdf", reason: "too-large" }]);
+    expect(h.server.files.size).toBe(0);
+  });
+
+  test("a conflict that replaces a file too large here takes it off the list", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.pdf", pdf(10));
+    h.files.binaries.set("x.pdf", pdf(MAX_ATTACHMENT_BYTES + 1));
+    h.engine.localChanged("x.pdf");
+    await settle(h, 2000);
+    expect(h.engine.status().notSynced).toEqual([{ path: "x.pdf", reason: "too-large" }]);
+    await h.server.seedFile("x.pdf", pdf(20));
+    await h.engine.check(false);
+    expect(bytesOf(h, "x.pdf")).toEqual(pdf(20));
+    // The copy holds the large bytes now, and is what stays on the list.
+    expect(h.engine.status().notSynced.map((n) => [n.path, n.reason])).toEqual([[h.conflicts[0]![1], "too-large"]]);
   });
 
   test("the limit is 15 MB exactly", async () => {

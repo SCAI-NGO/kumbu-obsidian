@@ -21,6 +21,8 @@ export interface Settings { server: string; vault: string; device: string; secre
 export interface PluginData { settings: Settings; state: SyncState; announced: string[]; }
 
 export const emptyState = (): SyncState => ({ bases: {}, cursor: null, lastFullAt: null, lastSyncAt: null });
+/** Long enough to read a file's name, the reason and what to do. */
+const NOTICE_MS = 10_000;
 const emptySettings = (): Settings => ({ server: "", vault: "", device: "", secretId: "", ownsSecret: false });
 
 /** Unique per Obsidian vault where the app has it (appId, undocumented), else the vault's folder name. */
@@ -292,7 +294,7 @@ export default class KumbuSyncPlugin extends Plugin {
   private announceTooLarge(status: SyncStatus): void {
     const result = announce(this.data.announced, status.notSynced, (path) => this.sizeOf(path));
     if (!result.changed) return;
-    for (const text of result.notices) new Notice(text, 0);
+    for (const text of result.notices) new Notice(text, NOTICE_MS);
     this.data.announced = result.announced;
     void this.saveAll();
   }

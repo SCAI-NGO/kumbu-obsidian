@@ -39,6 +39,8 @@ const RETRY_MAX_MS = 5 * 60_000;
 const MAX_ROUNDS = 4;
 /** Marks a path listed for an unexpected error: never equal to a version, so it is tried again every time. */
 const UNEXPECTED = "!";
+/** The version of an attachment too large to read: never equal to a real one, so it always differs from both sides. */
+const TOO_LARGE = "!too-large";
 const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$/;
 
 /** What an operation found out: decide again with this remote version. */
@@ -196,7 +198,7 @@ export class SyncEngine {
     void this.run(async () => {
       if (this.firstSyncChoose !== null) return false;
       const base = this.state.bases[fk];
-      const now = (await this.readLocal(tk, to)).version;
+      const now = await this.localVersion(tk, to);
       if (base !== undefined && now === base && this.state.bases[tk] === undefined) {
         let moved: MoveResult = { ok: false };
         try {
@@ -397,8 +399,7 @@ export class SyncEngine {
     const sides = new Map<string, { local: Version | null; remote: Version | null }>();
     for (const key of keys) {
       if (this.state.bases[key] !== undefined) continue;
-      const { version } = await this.readLocal(key, this.localPathOf.get(key) ?? key);
-      sides.set(key, { local: version, remote: remote.get(key) ?? null });
+      sides.set(key, { local: await this.localVersion(key, this.localPathOf.get(key) ?? key), remote: remote.get(key) ?? null });
     }
     const plan = makePlan(sides, this.status().notSynced);
     let choice: Choice = this.state.pendingChoice ?? "both";
@@ -647,7 +648,10 @@ export class SyncEngine {
       copyText = next;
       replaced = await this.o.local.writeIf(path, await versionOf(now), note.content);
     }
-    if (replaced) await this.setBase(key, note.version);
+    if (replaced) {
+      this.forgetProblems(key);
+      await this.setBase(key, note.version);
+    }
     // Uploaded whatever happened to the original: it is a note of its own now.
     await this.syncPath(copyKey, null, false);
     // The original changed again meanwhile (typed, deleted): decided once more, against the copy's text.
@@ -675,7 +679,10 @@ export class SyncEngine {
       copyVersion = await versionOfBytes(now);
       replaced = await this.o.local.writeBinaryIf(path, copyVersion, theirs.bytes);
     }
-    if (replaced) await this.setBase(key, theirs.version);
+    if (replaced) {
+      this.forgetProblems(key);
+      await this.setBase(key, theirs.version);
+    }
     await this.syncPath(copyKey, null, false);
     return replaced ? undefined : { remote: theirs.version };
   }
@@ -707,6 +714,12 @@ export class SyncEngine {
     }
     const text = await this.o.local.read(path);
     return { content: text, version: text === null ? null : await versionOf(text) };
+  }
+
+  /** readLocal's version, without reading an attachment over its limit (TOO_LARGE): only a comparison needs it. */
+  private async localVersion(key: string, path: string): Promise<Version | null> {
+    if (isFile(key) && ((await this.o.local.size(path)) ?? 0) > MAX_ATTACHMENT_BYTES) return TOO_LARGE;
+    return (await this.readLocal(key, path)).version;
   }
 
   private writeLocalIf(path: string, expected: Version | null, content: Content): Promise<boolean> {
