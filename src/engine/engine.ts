@@ -45,7 +45,7 @@ const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$
 
 /**
  * Kumbu² lists the path with a version but doesn't hand its bytes over (they don't open, or the vault is locked): not a
- * deletion. The path is listed and decided again from the old cursor; a real deletion comes in the next answer.
+ * deletion. The path is listed and decided again by every check with that version; a real deletion comes in an answer.
  */
 class UnservedError extends Error {}
 const CANT_OPEN = "Kumbu² can't open this file just now; it is tried again with every sync.";
@@ -77,8 +77,11 @@ export class SyncEngine {
   private readonly rejected = new Map<string, { version: Version; detail: string }>();
   private caseClashes = new Map<string, string>();
   private damaged = 0;
-  /** A path couldn't be decided in this check (UnservedError): the check keeps its old cursor. */
-  private pathFailed = false;
+  /**
+   * Attachments Kumbu² listed but couldn't hand over (UnservedError), with the version it listed: every check decides
+   * them again with it, so the cursor moves on (a broken file doesn't hold it) and a start's full check finds them anew.
+   */
+  private readonly unserved = new Map<string, Version>();
   private supportsAttachments = false;
   private readonly conflicts = new Set<string>();
   private connection: ConnectionMode = "polling";
@@ -275,11 +278,11 @@ export class SyncEngine {
     const answer = await this.o.remote.versions(full ? null : this.state.cursor, null);
     const { remote, keys } = await this.resolve(answer);
     const damagedPossible = answer.full && answer.damaged > 0;
-    this.pathFailed = false;
+    let pathFailed = false;
     for (const key of keys) {
       if (this.stopped) return;
       const base = this.state.bases[key] ?? null;
-      const known = answer.full ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : base;
+      const known = answer.full ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : (this.unserved.get(key) ?? base);
       // Still being typed in: its debounce uploads it (spec §6, rule 6), unless the server has news for it.
       if (this.debounces.has(key) && known === base) continue;
       try {
@@ -288,20 +291,19 @@ export class SyncEngine {
         if (e instanceof OfflineError || e instanceof AuthError) throw e;
         // One path's local trouble doesn't hold up the others; it is listed and tried again by every check.
         this.rejected.set(key, { version: UNEXPECTED, detail: `Couldn't sync: ${e instanceof Error ? e.message : "unknown error"}` });
-        this.pathFailed = true;
+        pathFailed = true;
       }
     }
     // The old cursor stays while a path failed, so the next check asks for it again.
-    if (!this.pathFailed) await this.finishCheck(answer);
+    if (!pathFailed) await this.finishCheck(answer);
   }
 
-  /** `keepCursor`: a path failed, so the next check asks from the old cursor again (a full one after a first sync). */
-  private async finishCheck(answer: VersionsAnswer, keepCursor = false): Promise<void> {
+  private async finishCheck(answer: VersionsAnswer): Promise<void> {
     // Every answer counts the vault's damaged notes; a damaged path is in neither list, so it is never "deleted".
     this.damaged = answer.damaged;
     if (answer.full) this.state.lastFullAt = new Date(this.o.clock.now()).toISOString();
     // Only after every path is done: a check that fails halfway asks again from the old cursor.
-    if (!keepCursor) this.state.cursor = answer.cursor;
+    this.state.cursor = answer.cursor;
     this.state.lastSyncAt = new Date(this.o.clock.now()).toISOString();
     await this.save();
   }
@@ -409,7 +411,6 @@ export class SyncEngine {
   private async runFirstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
     const answer = await this.o.remote.versions(null, null);
     const { remote, keys } = await this.resolve(answer);
-    this.pathFailed = false;
     const sides = new Map<string, { local: Version | null; remote: Version | null }>();
     for (const key of keys) {
       if (this.state.bases[key] !== undefined) continue;
@@ -462,7 +463,7 @@ export class SyncEngine {
     }
     if (this.stopped) return null;
     delete this.state.pendingChoice;
-    await this.finishCheck(answer, this.pathFailed);
+    await this.finishCheck(answer);
     return { ...counts, conflictCopies: this.copiesMade - copiesBefore, notSynced: this.status().notSynced };
   }
 
@@ -525,6 +526,8 @@ export class SyncEngine {
   }
 
   private async syncPath(key: string, remote: Version | null, damagedPossible: boolean): Promise<void> {
+    // Decided now; set again below if Kumbu² still can't hand it over.
+    this.unserved.delete(key);
     if (eligibility(key, this.supportsAttachments) !== "sync" || this.caseClashes.has(key)) {
       this.dirty.delete(key);
       return;
@@ -556,9 +559,10 @@ export class SyncEngine {
         again = await this.act(key, path, content, local, remote, action);
       } catch (e) {
         if (e instanceof UnservedError) {
-          // Dirty still: tried again by the next check, which asks from the old cursor.
+          // Dirty, and remembered with the version listed: tried again by every check.
           this.rejected.set(key, { version: UNEXPECTED, detail: `Couldn't sync: ${e.message}` });
-          this.pathFailed = true;
+          this.dirty.add(key);
+          if (remote !== null) this.unserved.set(key, remote);
           return;
         }
         if (!(e instanceof RejectedError)) throw e;

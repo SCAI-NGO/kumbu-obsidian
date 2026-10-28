@@ -388,19 +388,21 @@ describe("a file the server lists but can't hand over", () => {
     await h.server.seedFile("x.png", png(2));
     const repair = unserved(h, "x.png");
     await h.engine.check(false);
+    // Past the server's overlap: the answer names x.png no more, and the cursor moved on, yet it is tried again.
+    vi.setSystemTime(Date.now() + 10 * 60_000);
     await h.engine.check(false);
+    expect(h.server.calls.filter((c) => c.method === "versions").map((c) => c.args[0])).not.toContain(null);
     expect(bytesOf(h, "x.png")).toEqual(png(1));
     expect(h.files.systemTrash).toEqual([]);
     expect(h.state.state.bases["x.png"]).toBe(await versionOfBytes(png(1)));
-    expect(h.state.state.cursor).toBe(cursor);
+    expect(h.state.state.cursor).not.toBe(cursor);
     expect(h.engine.status().notSynced).toEqual([{ path: "x.png", reason: "rejected", detail: CANT_OPEN }]);
 
     repair();
-    vi.setSystemTime(Date.now() + 60_000);
+    vi.setSystemTime(Date.now() + 10 * 60_000);
     await h.engine.check(false);
     expect(bytesOf(h, "x.png")).toEqual(png(2));
     expect(h.engine.status().notSynced).toEqual([]);
-    expect(h.state.state.cursor).not.toBe(cursor);
   });
 
   test("keeps a changed local file whole in a conflict", async () => {
@@ -428,15 +430,40 @@ describe("a file the server lists but can't hand over", () => {
     expect(h.engine.status().notSynced).toEqual([]);
   });
 
-  test("doesn't hold up a first sync, whose next check asks for everything again", async () => {
+  test("doesn't hold up a first sync, which finishes and leaves it to the next check", async () => {
     const h = await harness({ start: false, localOnly: { "a.md": "a" }, remoteFiles: { "x.png": png(2) } });
     const repair = unserved(h, "x.png");
     const summary = await h.engine.firstSync(() => Promise.resolve("both"));
     expect(summary).toMatchObject({ uploaded: 1, downloaded: 0, notSynced: [{ path: "x.png", reason: "rejected", detail: CANT_OPEN }] });
-    expect(h.state.state.cursor).toBeNull();
+    // Finished: the plugin starts with start(), not a first sync, whenever a cursor is saved.
+    expect(h.state.state.cursor).not.toBeNull();
     repair();
+    vi.setSystemTime(Date.now() + 10 * 60_000);
     await h.engine.check(false);
     expect(bytesOf(h, "x.png")).toEqual(png(2));
+    expect(h.engine.status().notSynced).toEqual([]);
+  });
+
+  test("a restart after a first sync with a file Kumbu² can't hand over doesn't run the first sync again", async () => {
+    const h = await harness({ start: false, remoteFiles: { "x.png": png(2), "d.png": png(4) } });
+    h.files.binaries.set("d.png", png(5));
+    const repair = unserved(h, "x.png");
+    let asked = 0;
+    await h.engine.firstSync(() => { asked++; return Promise.resolve("both"); });
+    expect(asked).toBe(1);
+    expect(h.state.state.cursor).not.toBeNull();
+    expect(h.state.state.pendingChoice).toBeUndefined();
+
+    // As the plugin's next start: a saved cursor means start(), whose full check finds x.png again.
+    await h.engine.stop();
+    await h.engine.start();
+    expect(h.engine.status().notSynced).toEqual([{ path: "x.png", reason: "rejected", detail: CANT_OPEN }]);
+    repair();
+    await h.engine.stop();
+    await h.engine.start();
+    expect(bytesOf(h, "x.png")).toEqual(png(2));
+    expect(asked).toBe(1);
+    expect(h.files.trash).toEqual([]);
     expect(h.engine.status().notSynced).toEqual([]);
   });
 });
