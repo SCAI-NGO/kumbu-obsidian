@@ -52,7 +52,7 @@ export function notSyncedSummary(list: NotSynced[]): string {
 
 /** What the first sync's summary adds after the counts: why the files Kumbu² doesn't keep stayed behind. */
 export function notSyncedNote(list: NotSynced[]): string {
-  if (list.some((n) => n.reason === "attachment")) return " (Kumbu² keeps text only)";
+  if (list.some((n) => n.reason === "attachment")) return " (this Kumbu² server keeps notes only)";
   if (list.some((n) => n.reason === "unsupported")) return " (Kumbu² keeps notes, PDFs and images only)";
   return "";
 }
@@ -60,7 +60,7 @@ export function notSyncedNote(list: NotSynced[]): string {
 /** One line per file for the settings: path and why. */
 export function reasonText(n: NotSynced): string {
   switch (n.reason) {
-    case "attachment": return "Attachment: Kumbu² keeps text only.";
+    case "attachment": return "This Kumbu² server keeps notes only.";
     case "unsupported": return "Kumbu² keeps notes, PDFs and images only.";
     case "too-large": return tooLargeText(n.path);
     case "rejected": return n.detail ?? "Refused by the server.";

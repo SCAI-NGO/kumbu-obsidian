@@ -7,7 +7,7 @@ const tooLarge = (path: string): NotSynced => ({ path, reason: "too-large" });
 
 test("each reason has its sentence", () => {
   expect(reasonText({ path: "report.docx", reason: "unsupported" })).toBe("Kumbu² keeps notes, PDFs and images only.");
-  expect(reasonText({ path: "x.png", reason: "attachment" })).toBe("Attachment: Kumbu² keeps text only.");
+  expect(reasonText({ path: "x.png", reason: "attachment" })).toBe("This Kumbu² server keeps notes only.");
   expect(reasonText({ path: "a.md", reason: "rejected", detail: "Not allowed." })).toBe("Not allowed.");
 });
 
@@ -25,7 +25,7 @@ test("unsupported files count by kind like attachments", () => {
 });
 
 test("the first sync's summary says why files stay behind", () => {
-  expect(notSyncedNote([{ path: "x.png", reason: "attachment" }])).toBe(" (Kumbu² keeps text only)");
+  expect(notSyncedNote([{ path: "x.png", reason: "attachment" }])).toBe(" (this Kumbu² server keeps notes only)");
   expect(notSyncedNote([{ path: "x.docx", reason: "unsupported" }])).toBe(" (Kumbu² keeps notes, PDFs and images only)");
   expect(notSyncedNote([tooLarge("a.pdf")])).toBe("");
 });
