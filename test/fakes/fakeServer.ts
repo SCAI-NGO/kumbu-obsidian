@@ -142,8 +142,18 @@ export class FakeServer implements RemoteApi {
 
   async move(from: string, to: string): Promise<MoveResult> {
     await this.enter("move", [from, to]);
+    const file = this.attachmentsSupported ? this.files.get(from) : undefined;
+    if (file) {
+      // As the server's mv: an attachment keeps its format, so its extension.
+      if (this.files.has(to) || this.notes.has(to) || kindOf(to) !== kindOf(from)) return { ok: false };
+      this.files.delete(from);
+      this.files.set(to, { ...file, lastWriter: this.deviceWriter + " (mv)" });
+      this.touch(from);
+      this.touch(to);
+      return { ok: true, version: file.version };
+    }
     const existing = this.notes.get(from);
-    if (!existing || this.notes.has(to)) return { ok: false };
+    if (!existing || this.notes.has(to) || this.files.has(to)) return { ok: false };
     this.notes.delete(from);
     this.notes.set(to, { ...existing, lastWriter: this.deviceWriter + " (mv)" });
     this.touch(from);

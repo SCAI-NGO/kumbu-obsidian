@@ -107,6 +107,14 @@ export class FakeFiles implements LocalFiles {
     return Promise.resolve(true);
   }
 
+  async trashBinaryIf(path: string, expected: Version): Promise<boolean> {
+    this.beforeTrash?.(path);
+    const p = this.existing(path);
+    if (p === undefined || (await versionOfBytes(this.bytesOf(p))) !== expected) return false;
+    this.remove(path, this.systemTrash);
+    return true;
+  }
+
   rename(from: string, to: string): Promise<void> {
     this.userRename(from, to);
     return Promise.resolve();

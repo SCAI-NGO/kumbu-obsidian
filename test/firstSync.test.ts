@@ -75,8 +75,8 @@ test("cancelling the choice saves nothing", async () => {
   expect(h.files.files.get("d.md")).toBe("local");
 });
 
-test("attachments are counted, not synced", async () => {
-  const h = await harness({ start: false, localOnly: { "a.md": "a", "x.png": "png" } });
+test("attachments are counted, not synced, on a server without them", async () => {
+  const h = await harness({ start: false, localOnly: { "a.md": "a", "x.png": "png" }, oldServer: true });
   const summary = await h.engine.firstSync(chooser("both"));
   expect(summary!.notSynced).toEqual([{ path: "x.png", reason: "attachment" }]);
   expect(h.server.notes.has("x.png")).toBe(false);

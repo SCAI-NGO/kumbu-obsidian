@@ -164,6 +164,7 @@ describe("binary files", () => {
   function binaryApp(disk: Record<string, Uint8Array>) {
     const files = new Map(Object.entries(disk).map(([p, b]) => [p, b.slice().buffer]));
     let whileReading: (() => void) | null = null;
+    const trashed: string[] = [];
     const app = {
       vault: {
         getFileByPath: (p: string) => (files.has(p) ? new TFile(p) : null),
@@ -183,8 +184,11 @@ describe("binary files", () => {
         modifyBinary: (f: TFile, data: ArrayBuffer) => { files.set(f.path, data); return Promise.resolve(); },
         createFolder: () => Promise.resolve(),
       },
+      fileManager: {
+        trashFile: (f: TFile) => { trashed.push(f.path); files.delete(f.path); return Promise.resolve(); },
+      },
     };
-    return { app: app as unknown as App, files, duringRead: (fn: () => void) => { whileReading = fn; } };
+    return { app: app as unknown as App, files, trashed, duringRead: (fn: () => void) => { whileReading = fn; } };
   }
   const bytes = (...b: number[]) => new Uint8Array(b);
 
@@ -218,6 +222,17 @@ describe("binary files", () => {
     const f = binaryApp({});
     (f.app.vault as { createBinary: unknown }).createBinary = () => Promise.reject(new Error("The disk is full."));
     await expect(new VaultFiles(f.app).writeBinaryIf("a.png", null, bytes(1).buffer)).rejects.toThrow("The disk is full.");
+  });
+
+  test("trashBinaryIf trashes a file only while its bytes are the expected version", async () => {
+    const f = binaryApp({ "a.png": bytes(1, 0x0d, 0x0a), "b.png": bytes(2) });
+    const files = new VaultFiles(f.app);
+    // Bytes, not text: a CRLF is not normalised away as in a note's version.
+    expect(await files.trashBinaryIf("a.png", await versionOfBytes(bytes(1, 0x0a)))).toBe(false);
+    expect(await files.trashBinaryIf("a.png", await versionOfBytes(bytes(1, 0x0d, 0x0a)))).toBe(true);
+    expect(await files.trashBinaryIf("b.png", await versionOfBytes(bytes(2)))).toBe(true);
+    expect(await files.trashBinaryIf("c.png", await versionOfBytes(bytes(3)))).toBe(false);
+    expect(f.trashed).toEqual(["a.png", "b.png"]);
   });
 
   test("writeBinaryIf with a version for a missing file writes nothing", async () => {

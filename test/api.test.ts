@@ -164,7 +164,7 @@ describe("server detection", () => {
     expect(h.server.files.size).toBe(0);
   });
 
-  test("a server with attachments is detected; until they sync, its files are left alone", async () => {
+  test("a server with attachments is detected, and its files sync", async () => {
     const h = await harness({
       localOnly: { "a.md": "one", "img/x.png": "png" }, remoteOnly: { "a.md": "one" }, remoteFiles: { "img/y.png": png }, start: false,
     });
@@ -172,9 +172,9 @@ describe("server detection", () => {
     const summary = await h.engine.firstSync(choose);
     expect(h.engine.attachmentsSupported).toBe(true);
     expect(choose).not.toHaveBeenCalled();
-    expect(summary).toMatchObject({ uploaded: 0, downloaded: 0, unchanged: 1 });
-    expect(h.files.files.has("img/y.png")).toBe(false);
-    expect(h.server.calls.map((c) => c.method)).toEqual(["versions"]);
-    expect(h.engine.status().notSynced).toEqual([{ path: "img/x.png", reason: "attachment" }]);
+    expect(summary).toMatchObject({ uploaded: 1, downloaded: 1, unchanged: 1 });
+    expect(h.files.binaries.get("img/y.png")).toEqual(png);
+    expect(h.server.files.has("img/x.png")).toBe(true);
+    expect(h.engine.status().notSynced).toEqual([]);
   });
 });

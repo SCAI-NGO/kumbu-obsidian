@@ -65,6 +65,8 @@ export interface LocalFiles {
    * still has version `expected`, checked right before trashing. Returns false, and keeps the file, if it changed.
    */
   trashIf(path: string, expected: Version): Promise<boolean>;
+  /** trashIf for an attachment: by the user's trash setting, only if the file's bytes still have version `expected`. */
+  trashBinaryIf(path: string, expected: Version): Promise<boolean>;
   rename(from: string, to: string): Promise<void>;
   /** Deletes the folder if it has nothing in it at all, dot files included. True if it deleted it. */
   removeFolderIfEmpty(path: string): Promise<boolean>;
@@ -79,7 +81,11 @@ export interface SyncState {
 export interface StateStore { load(): Promise<SyncState>; save(state: SyncState): Promise<void>; }
 export interface Clock { now(): number; setTimeout(fn: () => void, ms: number): unknown; clearTimeout(handle: unknown): void; }
 
-export type NotSyncedReason = "attachment" | "too-large" | "rejected" | "case-clash" | "damaged-vault";
+/**
+ * "attachment": a file other than a note on a server without attachments (today's list); "unsupported": a format
+ * Kumbu² doesn't keep, on a server that keeps PDFs and images.
+ */
+export type NotSyncedReason = "attachment" | "unsupported" | "too-large" | "rejected" | "case-clash" | "damaged-vault";
 export interface NotSynced { path: string; reason: NotSyncedReason; detail?: string; }
 export type ConnectionMode = "live" | "polling" | "offline";
 export interface SyncStatus { mode: ConnectionMode; notSynced: NotSynced[]; conflicts: string[]; busy: boolean; lastSyncAt: string | null; }

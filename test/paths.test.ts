@@ -22,11 +22,23 @@ test("eligibility", () => {
   expect(eligibility("a/.hidden/b.md")).toBe("ignored");
   expect(eligibility(".trash/old.md")).toBe("ignored");
 });
+test("eligibility on a server that keeps attachments", () => {
+  for (const p of ["a.pdf", "img/b.PNG", "c.jpg", "d.jpeg", "e.gif", "f.webp", "notes/a.md"]) expect(eligibility(p, true)).toBe("sync");
+  for (const p of ["a.docx", "b.svg", "c.heic", "png", "x.png.zip"]) expect(eligibility(p, true)).toBe("attachment");
+  expect(eligibility(".obsidian/x.png", true)).toBe("ignored");
+  expect(eligibility("img/x.png", false)).toBe("attachment");
+});
 test("conflict copy sits next to the original", () => {
   expect(conflictCopyPath("projects/Plan.md", "Laptop", new Date(2026, 9, 27, 10, 15)))
     .toBe("projects/Plan (conflict Laptop 2026-10-27 10-15).md");
   expect(conflictCopyPath("Plan.md", "Laptop", new Date(2026, 0, 2, 3, 4)))
     .toBe("Plan (conflict Laptop 2026-01-02 03-04).md");
+});
+test("a conflict copy keeps an attachment's extension", () => {
+  expect(conflictCopyPath("layout_editor_bad1.png", "Laptop", new Date(2026, 9, 27, 22, 15)))
+    .toBe("layout_editor_bad1 (conflict Laptop 2026-10-27 22-15).png");
+  expect(conflictCopyPath("scans/a.b/Scan.PDF", "Laptop", new Date(2026, 9, 27, 22, 15)))
+    .toBe("scans/a.b/Scan (conflict Laptop 2026-10-27 22-15).PDF");
 });
 test("slug", () => {
   expect(slug("  Work -- Notes! ")).toBe("work-notes");

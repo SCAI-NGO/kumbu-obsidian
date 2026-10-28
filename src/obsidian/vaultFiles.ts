@@ -110,6 +110,15 @@ export class VaultFiles implements LocalFiles {
     return true;
   }
 
+  /** trashIf for an attachment: no editor holds it, so its bytes on disk are what is checked. */
+  async trashBinaryIf(path: string, expected: Version): Promise<boolean> {
+    const file = this.app.vault.getFileByPath(path);
+    if (!file) return false;
+    if ((await versionOfBytes(await this.app.vault.readBinary(file))) !== expected) return false;
+    await this.app.fileManager.trashFile(file);
+    return true;
+  }
+
   async rename(from: string, to: string): Promise<void> {
     const file = this.app.vault.getFileByPath(from);
     if (!file) return;

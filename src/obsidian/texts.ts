@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The plugin's sentences that depend on numbers, kept apart from the UI so they can be tested.
+import { attachmentKind } from "../engine/paths";
 import type { NotSynced, SyncStatus } from "../engine/ports";
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -29,7 +30,7 @@ const IMAGES = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg"]);
 export function notSyncedSummary(list: NotSynced[]): string {
   let images = 0, pdfs = 0, others = 0, tooLarge = 0, rejected = 0, clashes = 0;
   for (const n of files(list)) {
-    if (n.reason === "attachment") {
+    if (n.reason === "attachment" || n.reason === "unsupported") {
       const dot = n.path.lastIndexOf(".");
       const ext = dot > n.path.lastIndexOf("/") ? n.path.slice(dot + 1).toLowerCase() : "";
       if (IMAGES.has(ext)) images++;
@@ -49,17 +50,29 @@ export function notSyncedSummary(list: NotSynced[]): string {
   return parts.join(", ");
 }
 
-export function hasAttachments(list: NotSynced[]): boolean {
-  return list.some((n) => n.reason === "attachment");
+/** What the first sync's summary adds after the counts: why the files Kumbu² doesn't keep stayed behind. */
+export function notSyncedNote(list: NotSynced[]): string {
+  if (list.some((n) => n.reason === "attachment")) return " (Kumbu² keeps text only)";
+  if (list.some((n) => n.reason === "unsupported")) return " (Kumbu² keeps notes, PDFs and images only)";
+  return "";
 }
 
 /** One line per file for the settings: path and why. */
 export function reasonText(n: NotSynced): string {
   switch (n.reason) {
     case "attachment": return "Attachment: Kumbu² keeps text only.";
-    case "too-large": return "Larger than 1 MiB.";
+    case "unsupported": return "Kumbu² keeps notes, PDFs and images only.";
+    case "too-large": return tooLargeText(n.path);
     case "rejected": return n.detail ?? "Refused by the server.";
     case "case-clash": return n.detail ?? "Differs only in case from another note.";
     case "damaged-vault": return n.detail ?? "Some notes in Kumbu² can't be opened.";
+  }
+}
+
+function tooLargeText(path: string): string {
+  switch (attachmentKind(path)) {
+    case "image": return "Larger than 15 MB. Upload it in the Kumbu² web app, which can make it smaller.";
+    case "pdf": return "Larger than 15 MB, the limit for PDFs.";
+    case null: return "Larger than 1 MiB.";
   }
 }

@@ -113,6 +113,13 @@ export class NodeFiles implements LocalFiles {
     return Promise.resolve(true);
   }
 
+  async trashBinaryIf(path: string, expected: Version): Promise<boolean> {
+    const now = await this.readBinary(path);
+    if (now === null || (await versionOfBytes(now)) !== expected) return false;
+    this.toTrash(path);
+    return true;
+  }
+
   rename(from: string, to: string): Promise<void> {
     if (this.exists(to)) return Promise.reject(new Error(`${to} exists already.`));
     mkdirSync(dirname(this.abs(to)), { recursive: true });
@@ -130,7 +137,7 @@ export class NodeFiles implements LocalFiles {
   private toTrash(path: string): void {
     if (!this.exists(path)) return;
     let target = `.trash/${path}`;
-    for (let i = 1; this.exists(target); i++) target = `.trash/${path.replace(/\.md$/, "")} ${i}.md`;
+    for (let i = 1; this.exists(target); i++) target = `.trash/${path.replace(/(\.[^./]+)?$/, ` ${i}$1`)}`;
     mkdirSync(dirname(this.abs(target)), { recursive: true });
     renameSync(this.abs(path), this.abs(target));
   }
