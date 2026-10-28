@@ -3,14 +3,14 @@
 import { conflictCopyText } from "./conflict";
 import { decide, type Action } from "./decide";
 import { makePlan, type Choice, type FirstSyncSummary, type MergePlan } from "./firstSync";
-import { conflictCopyPath, eligibility } from "./paths";
+import { attachmentKind, conflictCopyPath, eligibility } from "./paths";
 import {
   AuthError, OfflineError, RejectedError,
-  type Clock, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi, type StateStore,
-  type SyncState, type SyncStatus, type Version,
+  type Clock, type FileStat, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi,
+  type StateStore, type SyncState, type SyncStatus, type Version,
 } from "./ports";
 import { SerialQueue } from "./queue";
-import { byteSize, MAX_BYTES, versionOf } from "./version";
+import { byteSize, MAX_BYTES, versionOf, versionOfBytes } from "./version";
 
 export interface EngineOptions {
   vault: string; device: string; local: LocalFiles; remote: RemoteApi; state: StateStore; clock: Clock;
@@ -23,6 +23,14 @@ export interface EngineOptions {
   onFirstSyncCancelled?(): void;
 }
 
+/** 15 MB per PDF or image, as the server takes them; notes keep their 1 MiB (MAX_BYTES). */
+export const MAX_ATTACHMENT_BYTES = 15_728_640;
+
+/** The most bytes a file at this path may have to sync. */
+export function limitOf(path: string): number {
+  return attachmentKind(path) === null ? MAX_BYTES : MAX_ATTACHMENT_BYTES;
+}
+
 const DEBOUNCE_MS = 2000;
 const FULL_AFTER_MS = 25 * 24 * 3600_000;
 const RETRY_FIRST_MS = 5000;
@@ -31,13 +39,28 @@ const RETRY_MAX_MS = 5 * 60_000;
 const MAX_ROUNDS = 4;
 /** Marks a path listed for an unexpected error: never equal to a version, so it is tried again every time. */
 const UNEXPECTED = "!";
-const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.md$/;
+/** The version of an attachment too large to read: never equal to a real one, so it always differs from both sides. */
+const TOO_LARGE = "!too-large";
+const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$/;
+
+/**
+ * Kumbu² lists the path with a version but doesn't hand its bytes over (they don't open, or the vault is locked): not a
+ * deletion. The path is listed and decided again by every check with that version; a real deletion comes in an answer.
+ */
+class UnservedError extends Error {}
+const CANT_OPEN = "Kumbu² can't open this file just now; it is tried again with every sync.";
 
 /** What an operation found out: decide again with this remote version. */
 interface Again { remote: Version | null; }
 
 /** Paths are compared as NFC, the form the server and other devices use. */
 const keyOf = (path: string) => path.normalize("NFC");
+
+/** A note's text or an attachment's bytes. */
+type Content = string | ArrayBuffer;
+
+/** A PDF or an image: its bytes go through the binary ports, and its version is of the bytes. */
+const isFile = (path: string) => attachmentKind(path) !== null;
 
 export class SyncEngine {
   private readonly o: EngineOptions;
@@ -54,6 +77,12 @@ export class SyncEngine {
   private readonly rejected = new Map<string, { version: Version; detail: string }>();
   private caseClashes = new Map<string, string>();
   private damaged = 0;
+  /**
+   * Attachments Kumbu² listed but couldn't hand over (UnservedError), with the version it listed: every check decides
+   * them again with it, so the cursor moves on (a broken file doesn't hold it) and a start's full check finds them anew.
+   */
+  private readonly unserved = new Map<string, Version>();
+  private supportsAttachments = false;
   private readonly conflicts = new Set<string>();
   private connection: ConnectionMode = "polling";
   private offline = false;
@@ -93,6 +122,11 @@ export class SyncEngine {
     return this.queue.idle();
   }
 
+  /** The server keeps attachments, as its last versions answer said; false until one has come. */
+  get attachmentsSupported(): boolean {
+    return this.supportsAttachments;
+  }
+
   /** The hint connection's mode; the engine shows "offline" over it while the server can't be reached. */
   setConnectionMode(mode: ConnectionMode): void {
     this.connection = mode;
@@ -101,16 +135,19 @@ export class SyncEngine {
 
   status(): SyncStatus {
     const notSynced: NotSynced[] = [];
-    for (const path of [...this.attachments].sort()) notSynced.push({ path, reason: "attachment" });
-    for (const path of [...this.tooLarge].sort()) notSynced.push({ path, reason: "too-large", detail: "Larger than 1 MiB." });
+    const other = this.supportsAttachments ? "unsupported" : "attachment";
+    for (const path of [...this.attachments].sort()) notSynced.push({ path, reason: other });
+    for (const path of [...this.tooLarge].sort()) notSynced.push({ path, reason: "too-large" });
     for (const [path, r] of [...this.rejected].sort()) notSynced.push({ path, reason: "rejected", detail: r.detail });
     for (const [path, winner] of [...this.caseClashes].sort()) {
       notSynced.push({ path, reason: "case-clash", detail: `Differs only in case from ${winner}.` });
     }
     if (this.damaged > 0) {
+      // With attachments the server counts damaged files too.
+      const what = this.supportsAttachments ? ["note or file", "notes or files"] : ["note", "notes"];
       notSynced.push({
         path: "", reason: "damaged-vault",
-        detail: `${this.damaged} ${this.damaged === 1 ? "note" : "notes"} in Kumbu² can't be opened, so no local file is trashed because a note is missing.`,
+        detail: `${this.damaged} ${what[this.damaged === 1 ? 0 : 1]} in Kumbu² can't be opened, so no local file is trashed because a ${what[0]} is missing.`,
       });
     }
     return {
@@ -124,7 +161,7 @@ export class SyncEngine {
 
   localChanged(path: string): void {
     if (this.stopped) return;
-    const kind = eligibility(path);
+    const kind = eligibility(path, this.supportsAttachments);
     if (kind === "ignored") return;
     if (kind === "attachment") {
       this.attachments.add(path);
@@ -143,7 +180,7 @@ export class SyncEngine {
 
   localDeleted(path: string): void {
     if (this.stopped) return;
-    const kind = eligibility(path);
+    const kind = eligibility(path, this.supportsAttachments);
     if (kind === "attachment") {
       this.attachments.delete(path);
       this.emit();
@@ -157,10 +194,10 @@ export class SyncEngine {
 
   localRenamed(from: string, to: string): void {
     if (this.stopped) return;
-    const fromSync = eligibility(from) === "sync";
-    const toSync = eligibility(to) === "sync";
-    if (!fromSync || !toSync) {
-      // In or out of what syncs (a dot folder, an extension change): a delete and a create.
+    const fromSync = eligibility(from, this.supportsAttachments) === "sync";
+    const toSync = eligibility(to, this.supportsAttachments) === "sync";
+    if (!fromSync || !toSync || isFile(from) !== isFile(to)) {
+      // In or out of what syncs (a dot folder, an extension change), or a note becoming a file: a delete and a create.
       this.localDeleted(from);
       this.localChanged(to);
       return;
@@ -175,8 +212,7 @@ export class SyncEngine {
     void this.run(async () => {
       if (this.firstSyncChoose !== null) return false;
       const base = this.state.bases[fk];
-      const text = await this.o.local.read(to);
-      const now = text === null ? null : await versionOf(text);
+      const now = await this.localVersion(tk, to);
       if (base !== undefined && now === base && this.state.bases[tk] === undefined) {
         let moved: MoveResult = { ok: false };
         try {
@@ -246,7 +282,7 @@ export class SyncEngine {
     for (const key of keys) {
       if (this.stopped) return;
       const base = this.state.bases[key] ?? null;
-      const known = answer.full ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : base;
+      const known = answer.full ? (remote.get(key) ?? null) : remote.has(key) ? remote.get(key)! : (this.unserved.get(key) ?? base);
       // Still being typed in: its debounce uploads it (spec §6, rule 6), unless the server has news for it.
       if (this.debounces.has(key) && known === base) continue;
       try {
@@ -275,17 +311,26 @@ export class SyncEngine {
   /** The answer's versions by key, without case clashes, and the keys a check decides, in order. */
   private async resolve(answer: VersionsAnswer): Promise<{ remote: Map<string, Version | null>; keys: string[] }> {
     const isFull = answer.full;
+    // Files that weren't synced a moment ago may be now: the local side is looked at in full once.
+    const newlySupported = answer.attachments && !this.supportsAttachments;
+    this.supportsAttachments = answer.attachments;
     const caseInsensitive = this.o.local.caseInsensitive;
     const fold = (k: string) => (caseInsensitive ? k.toLowerCase() : k);
 
-    const localKeys = await this.scanLocal(isFull);
+    const localKeys = await this.scanLocal(isFull || newlySupported);
 
     // Which spelling owns a case-folded path: synced paths first, then the answer in path order.
     if (isFull) this.caseClashes = new Map();
     const owner = new Map<string, string>();
     for (const k of Object.keys(this.state.bases)) owner.set(fold(k), k);
     const remote = new Map<string, Version | null>();
-    const entries = answer.entries.map((e) => ({ key: keyOf(e.path), version: e.version })).sort((a, b) => cmp(a.key, b.key));
+    // A server without attachments lists notes only. With them, a deleted path comes without a kind (the server's
+    // `deleted` is a list of paths): its extension says what it was, so syncPath treats it as notes' deletions are.
+    const kinds = new Set([undefined, "note", ...(answer.attachments ? ["image", "pdf"] : [])]);
+    const entries = answer.entries
+      .filter((e) => kinds.has(e.kind))
+      .map((e) => ({ key: keyOf(e.path), version: e.version }))
+      .sort((a, b) => cmp(a.key, b.key));
     for (const { key, version } of entries) {
       const winner = owner.get(fold(key));
       if (caseInsensitive && winner !== undefined && winner !== key) {
@@ -299,9 +344,11 @@ export class SyncEngine {
     }
 
     const keys = new Set<string>([...remote.keys(), ...this.dirty]);
-    if (isFull) {
-      for (const k of Object.keys(this.state.bases)) keys.add(k);
+    if (isFull || newlySupported) {
+      // Newly supported: an attachment deleted here while the server kept none is deleted there now.
+      for (const k of Object.keys(this.state.bases)) if (isFull || isFile(k)) keys.add(k);
       for (const [k, path] of localKeys) {
+        if (!isFull && !isFile(k)) continue;
         const winner = owner.get(fold(k)) ?? k;
         if (winner !== k) this.localPathOf.set(winner, path);
         if (!this.caseClashes.has(k)) keys.add(winner);
@@ -367,8 +414,13 @@ export class SyncEngine {
     const sides = new Map<string, { local: Version | null; remote: Version | null }>();
     for (const key of keys) {
       if (this.state.bases[key] !== undefined) continue;
-      const text = await this.o.local.read(this.localPathOf.get(key) ?? key);
-      sides.set(key, { local: text === null ? null : await versionOf(text), remote: remote.get(key) ?? null });
+      const local = await this.localVersion(key, this.localPathOf.get(key) ?? key);
+      // Stays as it is whatever the choice, so it is no part of the question: syncPath lists it.
+      if (local === TOO_LARGE) {
+        this.tooLarge.add(key);
+        continue;
+      }
+      sides.set(key, { local, remote: remote.get(key) ?? null });
     }
     const plan = makePlan(sides, this.status().notSynced);
     let choice: Choice = this.state.pendingChoice ?? "both";
@@ -415,17 +467,18 @@ export class SyncEngine {
     return { ...counts, conflictCopies: this.copiesMade - copiesBefore, notSynced: this.status().notSynced };
   }
 
-  /** The local text replaces Kumbu²'s, which stays in its history. False if it ended another way. */
+  /** The local text (or file) replaces Kumbu²'s, which stays in its history. False if it ended another way. */
   private async keepLocal(key: string, remote: Version): Promise<boolean> {
-    const text = await this.o.local.read(this.localPathOf.get(key) ?? key);
-    if (text === null) {
+    const path = this.localPathOf.get(key) ?? key;
+    if (await this.tooLargeToRead(key, path)) return false;
+    const { content, version: local } = await this.readLocal(key, path);
+    if (content === null || local === null) {
       await this.syncPath(key, remote, false);
       return false;
     }
-    const local = await versionOf(text);
     let again: Again | undefined;
     try {
-      again = await this.upload(key, text, remote);
+      again = await this.upload(key, content, remote);
     } catch (e) {
       if (!(e instanceof RejectedError)) throw e;
       this.rejected.set(key, { version: local, detail: e.message });
@@ -439,17 +492,18 @@ export class SyncEngine {
   /** Kumbu²'s text replaces the local file, which goes to Obsidian's .trash first. */
   private async keepKumbu(key: string): Promise<boolean> {
     const path = this.localPathOf.get(key) ?? key;
-    const note = await this.o.remote.read(key);
-    if (note === null) {
+    if (await this.tooLargeToRead(key, path)) return false;
+    const theirs = await this.readRemote(key);
+    if (theirs === null) {
       await this.syncPath(key, null, false);
       return false;
     }
     await this.o.local.trashToLocal(path);
-    if (!(await this.o.local.writeIf(path, null, note.content))) {
-      await this.syncPath(key, note.version, false);
+    if (!(await this.writeLocalIf(path, null, theirs.content))) {
+      await this.syncPath(key, theirs.version, false);
       return false;
     }
-    await this.setBase(key, note.version);
+    await this.setBase(key, theirs.version);
     return true;
   }
 
@@ -458,7 +512,7 @@ export class SyncEngine {
     const found = new Map<string, string>();
     if (full) this.attachments.clear();
     for (const path of await this.o.local.list()) {
-      const kind = eligibility(path);
+      const kind = eligibility(path, this.supportsAttachments);
       if (kind === "attachment") this.attachments.add(path);
       if (kind !== "sync") continue;
       const key = keyOf(path);
@@ -467,19 +521,34 @@ export class SyncEngine {
       if (COPY_NAME.test(key)) this.conflicts.add(key);
     }
     for (const copy of [...this.conflicts]) if (!found.has(copy)) this.conflicts.delete(copy);
+    if (full) for (const key of Object.keys(this.state.hashed ?? {})) if (!found.has(key)) delete this.state.hashed![key];
     return found;
   }
 
   private async syncPath(key: string, remote: Version | null, damagedPossible: boolean): Promise<void> {
-    if (eligibility(key) !== "sync" || this.caseClashes.has(key)) {
+    // Decided now; set again below if Kumbu² still can't hand it over.
+    this.unserved.delete(key);
+    if (eligibility(key, this.supportsAttachments) !== "sync" || this.caseClashes.has(key)) {
       this.dirty.delete(key);
       return;
     }
     for (let round = 0; round < MAX_ROUNDS; round++) {
       if (this.stopped) return;
       const path = this.localPathOf.get(key) ?? key;
-      const text = await this.o.local.read(path);
-      const local = text === null ? null : await versionOf(text);
+      const stat = isFile(key) ? await this.o.local.stat(path) : null;
+      if (await this.tooLargeToRead(key, path, stat)) {
+        this.dirty.delete(key);
+        return;
+      }
+      if (this.unchangedSinceHashed(key, stat, remote)) {
+        // What reading it would have found: nothing to do.
+        if (this.rejected.get(key)?.version === UNEXPECTED) this.rejected.delete(key);
+        this.dirty.delete(key);
+        return;
+      }
+      const { content, version: local } = await this.readLocal(key, path, stat);
+      // Gone here: nothing left that could be too large.
+      if (local === null) this.tooLarge.delete(key);
       const base = this.state.bases[key] ?? null;
       const action = decide({ local, remote, base, remoteDamagedPossible: damagedPossible });
       // A change of this device's the server refused is not sent again until the file changes again.
@@ -487,8 +556,15 @@ export class SyncEngine {
       if (outgoing && this.rejected.get(key)?.version === (local ?? "")) return;
       let again: Again | undefined;
       try {
-        again = await this.act(key, path, text, local, remote, action);
+        again = await this.act(key, path, content, local, remote, action);
       } catch (e) {
+        if (e instanceof UnservedError) {
+          // Dirty, and remembered with the version listed: tried again by every check.
+          this.rejected.set(key, { version: UNEXPECTED, detail: `Couldn't sync: ${e.message}` });
+          this.dirty.add(key);
+          if (remote !== null) this.unserved.set(key, remote);
+          return;
+        }
         if (!(e instanceof RejectedError)) throw e;
         this.rejected.set(key, { version: local ?? "", detail: e.message });
         this.dirty.delete(key);
@@ -503,8 +579,29 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * An attachment over its limit is never read (a 200 MB PDF on a phone), and no decision overwrites or trashes it: it
+   * stays as it is, listed as too large, and a different version in Kumbu² doesn't come over it (the web app's smaller
+   * copy of a photo keeps the photo's name). Once it fits again, it is decided against the base it had.
+   */
+  private async tooLargeToRead(key: string, path: string, stat?: FileStat | null): Promise<boolean> {
+    if (!isFile(key)) return false;
+    const size = stat === undefined ? await this.o.local.size(path) : (stat?.size ?? null);
+    if (size === null || size <= MAX_ATTACHMENT_BYTES) return false;
+    this.tooLarge.add(key);
+    return true;
+  }
+
+  /** Kumbu² is at the base, and the attachment's stat is what it was when its bytes were last found at the base. */
+  private unchangedSinceHashed(key: string, stat: FileStat | null, remote: Version | null): boolean {
+    const base = this.state.bases[key];
+    const hashed = this.state.hashed?.[key];
+    return stat !== null && base !== undefined && remote === base && hashed !== undefined && hashed.version === base
+      && hashed.size === stat.size && hashed.mtime === stat.mtime;
+  }
+
   private async act(
-    key: string, path: string, text: string | null, local: Version | null, remote: Version | null, action: Action,
+    key: string, path: string, content: Content | null, local: Version | null, remote: Version | null, action: Action,
   ): Promise<Again | undefined> {
     switch (action.kind) {
       case "nothing":
@@ -521,22 +618,28 @@ export class SyncEngine {
 
       case "upload":
       case "reupload":
-        return this.upload(key, text!, action.kind === "upload" ? action.base : null);
+        return this.upload(key, content!, action.kind === "upload" ? action.base : null);
 
       case "download": {
-        const note = await this.o.remote.read(key);
-        if (note === null) return { remote: null };
-        if (!(await this.o.local.writeIf(path, local, note.content))) return { remote: note.version };
+        const theirs = await this.readRemote(key);
+        if (theirs === null) {
+          // An attachment listed with a version: its bytes don't open, which is no deletion (a note's text is its record).
+          if (isFile(key)) throw new UnservedError(CANT_OPEN);
+          return { remote: null };
+        }
+        if (!(await this.writeLocalIf(path, local, theirs.content))) return { remote: theirs.version };
         this.localPathOf.set(key, path);
         this.forgetProblems(key);
-        await this.setBase(key, note.version);
+        await this.setBase(key, theirs.version);
         return undefined;
       }
 
       case "trashLocal": {
         // Checked by the adapter right before it trashes: a keystroke since the read makes it an edit to upload
         // (remote gone, local changed: reupload), not a file to trash.
-        if (local === null || !(await this.o.local.trashIf(path, local))) return { remote };
+        const trashed = local !== null
+          && (isFile(key) ? await this.o.local.trashBinaryIf(path, local) : await this.o.local.trashIf(path, local));
+        if (!trashed) return { remote };
         this.leftFolders.add(parentOf(path));
         delete this.state.bases[key];
         await this.save();
@@ -544,7 +647,7 @@ export class SyncEngine {
       }
 
       case "deleteRemote": {
-        const result = await this.o.remote.remove(key, action.base);
+        const result = isFile(key) ? await this.o.remote.removeFile(key, action.base) : await this.o.remote.remove(key, action.base);
         if (!result.ok && result.conflict !== null) return { remote: result.conflict.version };
         delete this.state.bases[key];
         this.forgetProblems(key);
@@ -553,17 +656,23 @@ export class SyncEngine {
       }
 
       case "conflict":
-        return this.conflict(key, path, text!, local!, remote);
+        return typeof content === "string"
+          ? this.conflict(key, path, content, local!, remote)
+          : this.conflictFile(key, path, content!, local!, remote);
     }
   }
 
-  private async upload(key: string, text: string, base: Version | null): Promise<Again | undefined> {
-    if (byteSize(text) > MAX_BYTES) {
+  /** A changed file is sent whole, as a note's text is. */
+  private async upload(key: string, content: Content, base: Version | null): Promise<Again | undefined> {
+    const size = typeof content === "string" ? byteSize(content) : content.byteLength;
+    if (size > limitOf(key)) {
       this.tooLarge.add(key);
       return undefined;
     }
     this.tooLarge.delete(key);
-    const result = await this.o.remote.put(key, text, base);
+    const result = typeof content === "string"
+      ? await this.o.remote.put(key, content, base)
+      : await this.o.remote.putFile(key, content, base);
     if (!result.ok) return { remote: result.conflict.version };
     await this.setBase(key, result.version);
     return undefined;
@@ -582,12 +691,7 @@ export class SyncEngine {
     const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, at));
     if (!(await this.o.local.writeIf(copy, null, copyText))) return { remote };
     // The copy is safe on disk before the original is overwritten, so a failure from here on loses nothing.
-    const copyKey = keyOf(copy);
-    this.localPathOf.set(copyKey, copy);
-    this.conflicts.add(copyKey);
-    this.dirty.add(copyKey);
-    this.copiesMade++;
-    this.o.onConflict(key, copyKey);
+    const copyKey = this.copyMade(key, copy);
     let replaced = await this.o.local.writeIf(path, local, note.content);
     // Typed on meanwhile: the newer text goes into the same copy, rather than a second copy for one conflict.
     for (let round = 0; !replaced && round < MAX_ROUNDS; round++) {
@@ -598,17 +702,101 @@ export class SyncEngine {
       copyText = next;
       replaced = await this.o.local.writeIf(path, await versionOf(now), note.content);
     }
-    if (replaced) await this.setBase(key, note.version);
+    if (replaced) {
+      this.forgetProblems(key);
+      await this.setBase(key, note.version);
+    }
     // Uploaded whatever happened to the original: it is a note of its own now.
     await this.syncPath(copyKey, null, false);
     // The original changed again meanwhile (typed, deleted): decided once more, against the copy's text.
     return replaced ? undefined : { remote: note.version };
   }
 
+  /**
+   * conflict() for an attachment: Kumbu²'s file keeps the path, the local bytes go unchanged into a copy next to it
+   * with the same extension (a file has no place for a callout; the notice and the settings name the copy).
+   */
+  private async conflictFile(key: string, path: string, bytes: ArrayBuffer, local: Version, remote: Version | null): Promise<Again | undefined> {
+    const theirs = await this.o.remote.readFile(key);
+    if (theirs === null) throw new UnservedError(CANT_OPEN);
+    if (theirs.version !== remote) return { remote: theirs.version };
+    const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, new Date(this.o.clock.now())));
+    if (!(await this.o.local.writeBinaryIf(copy, null, bytes))) return { remote };
+    const copyKey = this.copyMade(key, copy);
+    let copyVersion = local;
+    let replaced = await this.o.local.writeBinaryIf(path, local, theirs.bytes);
+    // Changed again meanwhile: the newer bytes replace the copy's, rather than a second copy for one conflict.
+    for (let round = 0; !replaced && round < MAX_ROUNDS; round++) {
+      const now = await this.o.local.readBinary(path);
+      if (now === null) break;
+      if (!(await this.o.local.writeBinaryIf(copy, copyVersion, now))) break;
+      copyVersion = await versionOfBytes(now);
+      replaced = await this.o.local.writeBinaryIf(path, copyVersion, theirs.bytes);
+    }
+    if (replaced) {
+      this.forgetProblems(key);
+      await this.setBase(key, theirs.version);
+    }
+    await this.syncPath(copyKey, null, false);
+    return replaced ? undefined : { remote: theirs.version };
+  }
+
+  /** Books a conflict copy that is on disk now: listed, reported, and uploaded as a file of its own. */
+  private copyMade(key: string, copy: string): string {
+    const copyKey = keyOf(copy);
+    this.localPathOf.set(copyKey, copy);
+    this.conflicts.add(copyKey);
+    this.dirty.add(copyKey);
+    this.copiesMade++;
+    this.o.onConflict(key, copyKey);
+    return copyKey;
+  }
+
+  /** "x (conflict … 10-15).png", else "x (conflict … 10-15) 2.png" and so on: the number goes after the stamp. */
   private async freeCopyPath(candidate: string): Promise<string> {
+    const at = candidate.lastIndexOf(")") + 1;
     let path = candidate;
-    for (let n = 2; (await this.o.local.read(path)) !== null; n++) path = candidate.replace(/\.md$/, ` ${n}.md`);
+    for (let n = 2; (await this.o.local.size(path)) !== null; n++) path = `${candidate.slice(0, at)} ${n}${candidate.slice(at)}`;
     return path;
+  }
+
+  /**
+   * The text the user sees, or an attachment's bytes, with its version. An attachment's version is kept with the stat
+   * it had before the read (`stat`, else asked now): a change during the read gives a new stat, so it is read again.
+   */
+  private async readLocal(key: string, path: string, stat?: FileStat | null): Promise<{ content: Content | null; version: Version | null }> {
+    if (isFile(key)) {
+      const before = stat === undefined ? await this.o.local.stat(path) : stat;
+      const bytes = await this.o.local.readBinary(path);
+      const version = bytes === null ? null : await versionOfBytes(bytes);
+      const hashed = (this.state.hashed ??= {});
+      if (version !== null && before !== null) hashed[key] = { size: before.size, mtime: before.mtime, version };
+      else delete hashed[key];
+      return { content: bytes, version };
+    }
+    const text = await this.o.local.read(path);
+    return { content: text, version: text === null ? null : await versionOf(text) };
+  }
+
+  /** readLocal's version, without reading an attachment over its limit (TOO_LARGE): only a comparison needs it. */
+  private async localVersion(key: string, path: string): Promise<Version | null> {
+    if (isFile(key) && ((await this.o.local.size(path)) ?? 0) > MAX_ATTACHMENT_BYTES) return TOO_LARGE;
+    return (await this.readLocal(key, path)).version;
+  }
+
+  private writeLocalIf(path: string, expected: Version | null, content: Content): Promise<boolean> {
+    return typeof content === "string"
+      ? this.o.local.writeIf(path, expected, content)
+      : this.o.local.writeBinaryIf(path, expected, content);
+  }
+
+  private async readRemote(key: string): Promise<{ content: Content; version: Version } | null> {
+    if (isFile(key)) {
+      const file = await this.o.remote.readFile(key);
+      return file === null ? null : { content: file.bytes, version: file.version };
+    }
+    const note = await this.o.remote.read(key);
+    return note === null ? null : { content: note.content, version: note.version };
   }
 
   /** Deletes the left folders that are empty now, and then their parents the same way, never the vault root. */

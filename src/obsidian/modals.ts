@@ -3,7 +3,7 @@
 import { Modal, Setting, type App } from "obsidian";
 import type { Choice, FirstSyncSummary, MergePlan } from "../engine/firstSync";
 import { conflictCopyPath } from "../engine/paths";
-import { choiceIntro, differTitle, hasAttachments, notSyncedSummary, resultHeadline } from "./texts";
+import { choiceIntro, differTitle, notSyncedNote, notSyncedSummary, resultHeadline } from "./texts";
 
 /** Asks once for all differing notes (spec §6). Closing it without Continue cancels the first sync. */
 export class ConflictChoiceModal extends Modal {
@@ -102,7 +102,7 @@ export class ResultModal extends Modal {
       cell.createDiv({ cls: "kumbu-sync-count-label", text: label });
     }
     const summary = notSyncedSummary(notSynced);
-    if (summary) contentEl.createEl("p", { text: summary + (hasAttachments(notSynced) ? " (Kumbu² keeps text only)" : "") });
+    if (summary) contentEl.createEl("p", { text: summary + notSyncedNote(notSynced) });
     contentEl.createEl("p", { text: "From now on changes sync live." });
     new Setting(contentEl).addButton((b) => b.setButtonText("Done").setCta().onClick(() => this.close()));
   }

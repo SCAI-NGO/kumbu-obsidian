@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// HttpFn over Obsidian's requestUrl: no CORS, works on mobile (spec §8).
+// HttpFn over Obsidian's requestUrl: no CORS, works on mobile (spec §8); text and binary bodies alike.
 import { requestUrl } from "obsidian";
 import type { HttpFn } from "../api/client";
 import { OfflineError } from "../engine/ports";
@@ -19,11 +19,29 @@ export const obsidianHttp: HttpFn = async (r) => {
   } catch (e) {
     throw new OfflineError(e instanceof Error ? e.message : "The request failed.");
   }
-  let text = "";
+  let bytes: ArrayBuffer | undefined;
   try {
-    text = response.text;
+    // The body as it came: an attachment's bytes.
+    bytes = response.arrayBuffer;
   } catch {
     // An answer without a body (204, 304).
   }
-  return { status: response.status, headers: response.headers, text };
+  let text: string | undefined;
+  return {
+    status: response.status,
+    headers: response.headers,
+    bytes,
+    // Decoded only when asked for: an attachment of up to 15 MB is never turned into a string it doesn't need.
+    get text(): string {
+      if (text === undefined) {
+        try {
+          text = response.text;
+        } catch {
+          // An answer without a body (204, 304).
+          text = "";
+        }
+      }
+      return text;
+    },
+  };
 };

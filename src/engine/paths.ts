@@ -16,23 +16,56 @@ export function fromApiPath(vault: string, apiPath: string): string {
 
 /** The note's REST URL path, each segment encoded like the web app's noteUrl. */
 export function urlFor(vault: string, path: string): string {
-  const segments = [vault, ...path.normalize("NFC").split("/")];
-  return "/api/notes/" + segments.map(encodeURIComponent).join("/");
+  return apiUrl("notes", vault, path);
 }
 
-export function eligibility(path: string): "sync" | "attachment" | "ignored" {
+/** The attachment's REST URL path (GET/PUT/DELETE /api/files), encoded as a note's. */
+export function fileUrlFor(vault: string, path: string): string {
+  return apiUrl("files", vault, path);
+}
+
+function apiUrl(api: "notes" | "files", vault: string, path: string): string {
+  const segments = [vault, ...path.normalize("NFC").split("/")];
+  return `/api/${api}/` + segments.map(encodeURIComponent).join("/");
+}
+
+/** The attachments Kumbu² keeps, by extension (the server checks the content against it). */
+const ATTACHMENTS: Record<string, "image" | "pdf"> = { pdf: "pdf", png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image" };
+
+function extensionOf(path: string): string {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+/** "image" or "pdf" for a file Kumbu² keeps as an attachment, null for anything else (a note included). */
+export function attachmentKind(path: string): "image" | "pdf" | null {
+  return ATTACHMENTS[extensionOf(path)] ?? null;
+}
+
+/**
+ * `attachments`: the server keeps PDFs and images, so they sync as notes do. "attachment" is any other file outside
+ * dot folders, which stays on the "not synced" list.
+ */
+export function eligibility(path: string, attachments = false): "sync" | "attachment" | "ignored" {
   const segments = path.split("/");
   if (segments.some((s) => s.startsWith("."))) return "ignored";
-  return path.toLowerCase().endsWith(".md") ? "sync" : "attachment";
+  if (path.toLowerCase().endsWith(".md")) return "sync";
+  return attachments && attachmentKind(path) !== null ? "sync" : "attachment";
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
-/** "projects/Plan.md" → "projects/Plan (conflict Laptop 2026-10-27 10-15).md", local time. */
+/**
+ * "projects/Plan.md" → "projects/Plan (conflict Laptop 2026-10-27 10-15).md", local time. An attachment keeps its
+ * extension: "shot.png" → "shot (conflict Laptop 2026-10-27 10-15).png".
+ */
 export function conflictCopyPath(path: string, device: string, at: Date): string {
-  const stem = path.replace(/\.md$/i, "");
+  const ext = extensionOf(path);
+  const isNote = ext === "md";
+  const stem = ext === "" ? path : path.slice(0, path.length - ext.length - 1);
   const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}-${pad(at.getMinutes())}`;
-  return `${stem} (conflict ${device} ${stamp}).md`;
+  return `${stem} (conflict ${device} ${stamp})${isNote ? ".md" : ext === "" ? "" : path.slice(stem.length)}`;
 }
 
 export function slug(text: string): string {

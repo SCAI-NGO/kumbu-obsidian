@@ -4,8 +4,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
-import type { LocalFiles, Version } from "../src/engine/ports";
-import { versionOfSync } from "../src/engine/version";
+import type { FileStat, LocalFiles, Version } from "../src/engine/ports";
+import { versionOfBytes, versionOfSync } from "../src/engine/version";
 
 export class NodeFiles implements LocalFiles {
   readonly caseInsensitive = false;
@@ -74,12 +74,40 @@ export class NodeFiles implements LocalFiles {
     }
   }
 
+  stat(path: string): Promise<FileStat | null> {
+    try {
+      const { size, mtimeMs } = statSync(this.abs(path));
+      return Promise.resolve({ size, mtime: mtimeMs });
+    } catch {
+      return Promise.resolve(null);
+    }
+  }
+
   writeIf(path: string, expected: Version | null, content: string): Promise<boolean> {
     const now = this.textOf(path);
     const version = now === null ? null : versionOfSync(now);
     if (version !== expected) return Promise.resolve(false);
     this.write(path, content);
     return Promise.resolve(true);
+  }
+
+  readBinary(path: string): Promise<ArrayBuffer | null> {
+    try {
+      return Promise.resolve(new Uint8Array(readFileSync(this.abs(path))).buffer);
+    } catch {
+      return Promise.resolve(null);
+    }
+  }
+
+  async writeBinaryIf(path: string, expected: Version | null, bytes: ArrayBuffer): Promise<boolean> {
+    const now = await this.readBinary(path);
+    if ((now === null ? null : await versionOfBytes(now)) !== expected) return false;
+    const file = this.abs(path);
+    mkdirSync(dirname(file), { recursive: true });
+    const temp = join(dirname(file), `.kumbu-e2e-${process.pid}.tmp`);
+    writeFileSync(temp, new Uint8Array(bytes));
+    renameSync(temp, file);
+    return true;
   }
 
   trashToLocal(path: string): Promise<void> {
@@ -92,6 +120,13 @@ export class NodeFiles implements LocalFiles {
     if (now === null || versionOfSync(now) !== expected) return Promise.resolve(false);
     this.toTrash(path);
     return Promise.resolve(true);
+  }
+
+  async trashBinaryIf(path: string, expected: Version): Promise<boolean> {
+    const now = await this.readBinary(path);
+    if (now === null || (await versionOfBytes(now)) !== expected) return false;
+    this.toTrash(path);
+    return true;
   }
 
   rename(from: string, to: string): Promise<void> {
@@ -111,7 +146,7 @@ export class NodeFiles implements LocalFiles {
   private toTrash(path: string): void {
     if (!this.exists(path)) return;
     let target = `.trash/${path}`;
-    for (let i = 1; this.exists(target); i++) target = `.trash/${path.replace(/\.md$/, "")} ${i}.md`;
+    for (let i = 1; this.exists(target); i++) target = `.trash/${path.replace(/(\.[^./]+)?$/, ` ${i}$1`)}`;
     mkdirSync(dirname(this.abs(target)), { recursive: true });
     renameSync(this.abs(path), this.abs(target));
   }

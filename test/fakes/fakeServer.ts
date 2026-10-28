@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // In-memory RemoteApi that behaves like the server's endpoints, with scripted holds and failures.
 import {
-  OfflineError,
-  type DeleteResult, type MoveResult, type PutResult, type RemoteApi, type RemoteEntry, type RemoteNote,
-  type Version, type VersionsAnswer,
+  OfflineError, RejectedError,
+  type DeleteResult, type FileDeleteResult, type FileKind, type FilePutResult, type MoveResult, type PutResult,
+  type RemoteApi, type RemoteEntry, type RemoteFile, type RemoteNote, type Version, type VersionsAnswer,
 } from "../../src/engine/ports";
-import { normaliseText, versionOf } from "../../src/engine/version";
+import { normaliseText, versionOf, versionOfBytes } from "../../src/engine/version";
 
 type Method = keyof RemoteApi;
 interface StoredNote { content: string; lastWriter: string; at: string; version: Version; }
+interface StoredFile { bytes: Uint8Array; lastWriter: string; at: string; version: Version; }
 
 const OVERLAP_MS = 5 * 60_000;
 
 export class FakeServer implements RemoteApi {
   readonly notes = new Map<string, StoredNote>();
+  /** Attachments, by path. */
+  readonly files = new Map<string, StoredFile>();
+  /** False: a server from before attachments, which ignores attachments=1 and answers 404 on /api/files. */
+  attachmentsSupported = true;
   /** Every path touched, with the server time of the touch, for since answers. */
   readonly touches: { path: string; at: number }[] = [];
   readonly calls: { method: Method; args: unknown[] }[] = [];
@@ -30,6 +35,10 @@ export class FakeServer implements RemoteApi {
 
   async seed(path: string, content: string, writer = "agent"): Promise<void> {
     await this.store(path, content, writer);
+  }
+
+  async seedFile(path: string, bytes: Uint8Array, writer = "agent"): Promise<void> {
+    await this.storeFile(path, bytes, writer);
   }
 
   /**
@@ -84,15 +93,26 @@ export class FakeServer implements RemoteApi {
     const cursorAt = this.now();
     const cursor = new Date(cursorAt).toISOString();
     const sinceAt = since === null ? NaN : Date.parse(since);
+    const attachments = this.attachmentsSupported;
+    // As the server: with attachments, every entry has its kind; without, attachments are nowhere in the answer.
+    const entry = (path: string, version: Version, kind: FileKind): RemoteEntry => (attachments ? { path, version, kind } : { path, version });
+    const files = attachments ? this.files : new Map<string, StoredFile>();
     if (Number.isNaN(sinceAt)) {
-      const entries: RemoteEntry[] = [...this.notes].map(([path, n]) => ({ path, version: n.version }));
-      return { full: true, entries, cursor, state: "s" + String(cursorAt), damaged: this.damaged, unchanged: false };
+      const entries: RemoteEntry[] = [
+        ...[...this.notes].map(([path, n]) => entry(path, n.version, "note")),
+        ...[...files].map(([path, f]) => entry(path, f.version, kindOf(path))),
+      ];
+      return { full: true, entries, cursor, state: "s" + String(cursorAt), damaged: this.damaged, unchanged: false, attachments };
     }
-    const touched = new Set(this.touches.filter((t) => t.at > sinceAt - OVERLAP_MS).map((t) => t.path));
+    const touched = new Set(this.touches.filter((t) => t.at > sinceAt - OVERLAP_MS).map((t) => t.path)
+      .filter((path) => attachments || kindOf(path) === "note"));
     const entries: RemoteEntry[] = [...touched]
-      .filter((path) => this.notes.has(path) || !this.damagedPaths.has(path))
-      .map((path) => ({ path, version: this.notes.get(path)?.version ?? null }));
-    return { full: false, entries, cursor, state: null, damaged: this.damaged, unchanged: false };
+      .filter((path) => this.notes.has(path) || files.has(path) || !this.damagedPaths.has(path))
+      .map((path) => {
+        const n = this.notes.get(path) ?? files.get(path);
+        return n ? entry(path, n.version, kindOf(path)) : { path, version: null };
+      });
+    return { full: false, entries, cursor, state: null, damaged: this.damaged, unchanged: false, attachments };
   }
 
   async read(path: string): Promise<RemoteNote | null> {
@@ -122,13 +142,54 @@ export class FakeServer implements RemoteApi {
 
   async move(from: string, to: string): Promise<MoveResult> {
     await this.enter("move", [from, to]);
+    const file = this.attachmentsSupported ? this.files.get(from) : undefined;
+    if (file) {
+      // As the server's mv (a 409): an attachment keeps its format, so its media type ("a.jpg" → "a.jpeg" may move).
+      if (this.files.has(to) || this.notes.has(to) || mediaTypeOf(to) !== mediaTypeOf(from)) return { ok: false };
+      this.files.delete(from);
+      this.files.set(to, { ...file, lastWriter: this.deviceWriter + " (mv)" });
+      this.touch(from);
+      this.touch(to);
+      return { ok: true, version: file.version };
+    }
     const existing = this.notes.get(from);
-    if (!existing || this.notes.has(to)) return { ok: false };
+    if (!existing || this.notes.has(to) || this.files.has(to)) return { ok: false };
     this.notes.delete(from);
     this.notes.set(to, { ...existing, lastWriter: this.deviceWriter + " (mv)" });
     this.touch(from);
     this.touch(to);
     return { ok: true, version: existing.version };
+  }
+
+  async readFile(path: string): Promise<RemoteFile | null> {
+    await this.enter("readFile", [path]);
+    const f = this.attachmentsSupported ? this.files.get(path) : undefined;
+    return f ? { bytes: f.bytes.slice().buffer, version: f.version } : null;
+  }
+
+  async putFile(path: string, bytes: ArrayBuffer, base: Version | null): Promise<FilePutResult> {
+    await this.enter("putFile", [path, bytes, base]);
+    if (!this.attachmentsSupported) throw new RejectedError("Not found.", 404);
+    const existing = this.files.get(path);
+    if (existing && existing.version !== base) return { ok: false, conflict: { version: existing.version } };
+    await this.storeFile(path, new Uint8Array(bytes), this.deviceWriter);
+    return { ok: true, version: this.files.get(path)!.version };
+  }
+
+  async removeFile(path: string, base: Version): Promise<FileDeleteResult> {
+    await this.enter("removeFile", [path, base]);
+    const existing = this.attachmentsSupported ? this.files.get(path) : undefined;
+    if (!existing) return { ok: false, conflict: null };
+    if (existing.version !== base) return { ok: false, conflict: { version: existing.version } };
+    this.files.delete(path);
+    this.touch(path);
+    return { ok: true };
+  }
+
+  private async storeFile(path: string, bytes: Uint8Array, writer: string, at = this.now()): Promise<void> {
+    const copy = bytes.slice();
+    this.files.set(path, { bytes: copy, lastWriter: writer, at: new Date(at).toISOString(), version: await versionOfBytes(copy) });
+    this.touch(path, at);
   }
 
   /** Returns the text it replaced, as it was at the moment of the write (a blind write, like an agent's). */
@@ -157,4 +218,15 @@ export class FakeServer implements RemoteApi {
     if (this.dropped.delete(method)) throw new OfflineError("the answer was lost");
     return result;
   }
+}
+
+function kindOf(path: string): FileKind {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".pdf")) return "pdf";
+  return lower.endsWith(".md") ? "note" : "image";
+}
+
+function mediaTypeOf(path: string): string {
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return ext === "jpg" ? "jpeg" : ext;
 }

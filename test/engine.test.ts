@@ -375,8 +375,8 @@ describe("not synced", () => {
     expect(h.engine.status().notSynced.filter((n) => n.reason === "rejected")).toEqual([]);
   });
 
-  test("attachments are listed, not synced", async () => {
-    const h = await harness({ synced: { "a.md": "one" }, localOnly: { "img/x.png": "png", ".obsidian/app.json": "{}" } });
+  test("attachments are listed, not synced, on a server without them", async () => {
+    const h = await harness({ synced: { "a.md": "one" }, localOnly: { "img/x.png": "png", ".obsidian/app.json": "{}" }, oldServer: true });
     expect(h.engine.status().notSynced).toEqual([{ path: "img/x.png", reason: "attachment" }]);
     expect(h.server.notes.has("img/x.png")).toBe(false);
   });

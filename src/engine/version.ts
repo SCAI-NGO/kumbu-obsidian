@@ -19,6 +19,12 @@ export async function versionOf(text: string): Promise<Version> {
   return toHex(new Uint8Array(digest)).slice(0, 12);
 }
 
+/** An attachment's token: of its raw bytes, a CR included (VersionToken.Of over bytes, no newline normalisation). */
+export async function versionOfBytes(bytes: ArrayBuffer | Uint8Array): Promise<Version> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  return toHex(new Uint8Array(digest)).slice(0, 12);
+}
+
 function toHex(bytes: Uint8Array): string {
   let hex = "";
   for (const b of bytes) hex += b.toString(16).padStart(2, "0");

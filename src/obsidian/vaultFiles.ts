@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // LocalFiles over Obsidian's Vault and FileManager.
 import { MarkdownView, Platform, TFile, type App, type Editor } from "obsidian";
-import type { LocalFiles, Version } from "../engine/ports";
-import { versionOfSync } from "../engine/version";
+import type { FileStat, LocalFiles, Version } from "../engine/ports";
+import { versionOfBytes, versionOfSync } from "../engine/version";
 
 export class VaultFiles implements LocalFiles {
   /** Where "Plan.md" and "plan.md" are one file: macOS, Windows and the phones; Linux keeps them apart. */
@@ -25,6 +25,11 @@ export class VaultFiles implements LocalFiles {
 
   size(path: string): Promise<number | null> {
     return Promise.resolve(this.app.vault.getFileByPath(path)?.stat.size ?? null);
+  }
+
+  stat(path: string): Promise<FileStat | null> {
+    const file = this.app.vault.getFileByPath(path);
+    return Promise.resolve(file ? { size: file.stat.size, mtime: file.stat.mtime } : null);
   }
 
   async writeIf(path: string, expected: Version | null, content: string): Promise<boolean> {
@@ -63,6 +68,35 @@ export class VaultFiles implements LocalFiles {
     return written;
   }
 
+  async readBinary(path: string): Promise<ArrayBuffer | null> {
+    const file = this.app.vault.getFileByPath(path);
+    return file ? this.app.vault.readBinary(file) : null;
+  }
+
+  /**
+   * An attachment has no editor and Vault has no `process` for bytes, so the check reads the file right before the
+   * write: only another program writing the same file in that moment could come between them.
+   */
+  async writeBinaryIf(path: string, expected: Version | null, bytes: ArrayBuffer): Promise<boolean> {
+    const file = this.app.vault.getFileByPath(path);
+    if (!file) {
+      if (expected !== null) return false;
+      await this.ensureFolder(path);
+      try {
+        await this.app.vault.createBinary(path, bytes);
+        return true;
+      } catch (e) {
+        // Created by someone else between the check and the create; any other failure is the caller's to see.
+        if (this.app.vault.getFileByPath(path)) return false;
+        throw e;
+      }
+    }
+    if (expected === null) return false;
+    if ((await versionOfBytes(await this.app.vault.readBinary(file))) !== expected) return false;
+    await this.app.vault.modifyBinary(file, bytes);
+    return true;
+  }
+
   async trashToLocal(path: string): Promise<void> {
     const file = this.app.vault.getFileByPath(path);
     // Chris decided: "Keep Kumbu²" always keeps the local text in Obsidian's .trash, whatever the user's setting.
@@ -77,6 +111,15 @@ export class VaultFiles implements LocalFiles {
     // through the editor, which is what is checked last.
     if (versionOfSync(await this.app.vault.read(file)) !== expected) return false;
     if (this.editorsOf(file).some((view) => versionOfSync(view.editor.getValue()) !== expected)) return false;
+    await this.app.fileManager.trashFile(file);
+    return true;
+  }
+
+  /** trashIf for an attachment: no editor holds it, so its bytes on disk are what is checked. */
+  async trashBinaryIf(path: string, expected: Version): Promise<boolean> {
+    const file = this.app.vault.getFileByPath(path);
+    if (!file) return false;
+    if ((await versionOfBytes(await this.app.vault.readBinary(file))) !== expected) return false;
     await this.app.fileManager.trashFile(file);
     return true;
   }

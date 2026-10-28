@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import type { App } from "obsidian";
 import { MarkdownView, TFile, TFolder } from "./fakes/obsidian";
 import { VaultFiles } from "../src/obsidian/vaultFiles";
-import { versionOfSync } from "../src/engine/version";
+import { versionOfBytes, versionOfSync } from "../src/engine/version";
 
 /** A vault of files on disk and editors open on some of them, shaped like the parts of App the adapter uses. */
 function fakeApp(disk: Record<string, string>) {
@@ -157,6 +157,99 @@ test("trashIf keeps a note changed on disk", async () => {
   const f = fakeApp({ "a.md": "changed" });
   expect(await new VaultFiles(f.app).trashIf("a.md", versionOfSync("base"))).toBe(false);
   expect(f.trashed).toEqual([]);
+});
+
+describe("binary files", () => {
+  /** A vault of binary files, with the Vault calls the adapter uses for them. */
+  function binaryApp(disk: Record<string, Uint8Array>) {
+    const files = new Map(Object.entries(disk).map(([p, b]) => [p, b.slice().buffer]));
+    let whileReading: (() => void) | null = null;
+    const trashed: string[] = [];
+    const app = {
+      vault: {
+        getFileByPath: (p: string) => (files.has(p) ? new TFile(p) : null),
+        getAbstractFileByPath: (p: string) => (files.has(p) ? new TFile(p) : null),
+        readBinary: async (f: TFile) => {
+          const data = files.get(f.path)!;
+          await Promise.resolve();
+          whileReading?.();
+          whileReading = null;
+          return data;
+        },
+        createBinary: (p: string, data: ArrayBuffer) => {
+          if (files.has(p)) return Promise.reject(new Error("File already exists."));
+          files.set(p, data);
+          return Promise.resolve(new TFile(p));
+        },
+        modifyBinary: (f: TFile, data: ArrayBuffer) => { files.set(f.path, data); return Promise.resolve(); },
+        createFolder: () => Promise.resolve(),
+      },
+      fileManager: {
+        trashFile: (f: TFile) => { trashed.push(f.path); files.delete(f.path); return Promise.resolve(); },
+      },
+    };
+    return { app: app as unknown as App, files, trashed, duringRead: (fn: () => void) => { whileReading = fn; } };
+  }
+  const bytes = (...b: number[]) => new Uint8Array(b);
+
+  test("readBinary gives the bytes as they are, null for a missing file", async () => {
+    const f = binaryApp({ "a.png": bytes(0x89, 0x0d, 0x0a) });
+    const files = new VaultFiles(f.app);
+    expect(new Uint8Array((await files.readBinary("a.png"))!)).toEqual(bytes(0x89, 0x0d, 0x0a));
+    expect(await files.readBinary("b.png")).toBeNull();
+  });
+
+  test("writeBinaryIf creates a missing file, never one made meanwhile", async () => {
+    const f = binaryApp({});
+    const files = new VaultFiles(f.app);
+    expect(await files.writeBinaryIf("img/a.png", null, bytes(1, 2).buffer)).toBe(true);
+    expect(new Uint8Array(f.files.get("img/a.png")!)).toEqual(bytes(1, 2));
+    expect(await files.writeBinaryIf("img/a.png", null, bytes(3).buffer)).toBe(false);
+    expect(new Uint8Array(f.files.get("img/a.png")!)).toEqual(bytes(1, 2));
+  });
+
+  test("writeBinaryIf replaces a file only at the expected version", async () => {
+    const f = binaryApp({ "a.png": bytes(1, 2) });
+    const files = new VaultFiles(f.app);
+    expect(await files.writeBinaryIf("a.png", await versionOfBytes(bytes(9)), bytes(3).buffer)).toBe(false);
+    expect(await files.writeBinaryIf("a.png", null, bytes(3).buffer)).toBe(false);
+    expect(new Uint8Array(f.files.get("a.png")!)).toEqual(bytes(1, 2));
+    expect(await files.writeBinaryIf("a.png", await versionOfBytes(bytes(1, 2)), bytes(3).buffer)).toBe(true);
+    expect(new Uint8Array(f.files.get("a.png")!)).toEqual(bytes(3));
+  });
+
+  test("writeBinaryIf passes on a failed create that no other file explains", async () => {
+    const f = binaryApp({});
+    (f.app.vault as { createBinary: unknown }).createBinary = () => Promise.reject(new Error("The disk is full."));
+    await expect(new VaultFiles(f.app).writeBinaryIf("a.png", null, bytes(1).buffer)).rejects.toThrow("The disk is full.");
+  });
+
+  test("trashBinaryIf trashes a file only while its bytes are the expected version", async () => {
+    const f = binaryApp({ "a.png": bytes(1, 0x0d, 0x0a), "b.png": bytes(2) });
+    const files = new VaultFiles(f.app);
+    // Bytes, not text: a CRLF is not normalised away as in a note's version.
+    expect(await files.trashBinaryIf("a.png", await versionOfBytes(bytes(1, 0x0a)))).toBe(false);
+    expect(await files.trashBinaryIf("a.png", await versionOfBytes(bytes(1, 0x0d, 0x0a)))).toBe(true);
+    expect(await files.trashBinaryIf("b.png", await versionOfBytes(bytes(2)))).toBe(true);
+    expect(await files.trashBinaryIf("c.png", await versionOfBytes(bytes(3)))).toBe(false);
+    expect(f.trashed).toEqual(["a.png", "b.png"]);
+  });
+
+  test("stat gives the size and modification time Obsidian has, null for a missing file", async () => {
+    const f = binaryApp({ "a.png": bytes(1, 2) });
+    const vault = f.app.vault as unknown as { getFileByPath: (p: string) => TFile | null };
+    const real = vault.getFileByPath;
+    vault.getFileByPath = (p) => { const file = real(p); if (file) file.stat = { size: 2, mtime: 1_700_000_000_000 }; return file; };
+    const files = new VaultFiles(f.app);
+    expect(await files.stat("a.png")).toEqual({ size: 2, mtime: 1_700_000_000_000 });
+    expect(await files.stat("b.png")).toBeNull();
+  });
+
+  test("writeBinaryIf with a version for a missing file writes nothing", async () => {
+    const f = binaryApp({});
+    expect(await new VaultFiles(f.app).writeBinaryIf("a.png", "aaaaaaaaaaaa", bytes(3).buffer)).toBe(false);
+    expect(f.files.size).toBe(0);
+  });
 });
 
 describe("removeFolderIfEmpty", () => {

@@ -3,9 +3,10 @@
 import { Notice, Platform, Plugin, TAbstractFile, TFile, type App } from "obsidian";
 import { KumbuApi, redeemPairing, trimServer } from "./api/client";
 import { SyncEngine } from "./engine/engine";
-import { defaultDeviceName, secretId, serverProblem } from "./engine/paths";
+import { attachmentKind, defaultDeviceName, secretId, serverProblem } from "./engine/paths";
 import { AuthError, OfflineError, type SyncState, type SyncStatus } from "./engine/ports";
 import { HintConnection, wsUrlFor } from "./live/hints";
+import { announce } from "./obsidian/announce";
 import { obsidianHttp } from "./obsidian/http";
 import { ConfirmModal, ConflictChoiceModal, ResultModal } from "./obsidian/modals";
 import { openSocket, windowClock } from "./obsidian/runtime";
@@ -16,9 +17,12 @@ import { VaultFiles } from "./obsidian/vaultFiles";
 
 /** `ownsSecret`: the secret was stored by pairing (and is forgotten on disconnect), not picked by the user. */
 export interface Settings { server: string; vault: string; device: string; secretId: string; ownsSecret: boolean; }
-export interface PluginData { settings: Settings; state: SyncState; }
+/** `announced`: files too large to sync whose notice has been shown, so each is announced once (see announce). */
+export interface PluginData { settings: Settings; state: SyncState; announced: string[]; }
 
 export const emptyState = (): SyncState => ({ bases: {}, cursor: null, lastFullAt: null, lastSyncAt: null });
+/** Long enough to read a file's name, the reason and what to do. */
+const NOTICE_MS = 10_000;
 const emptySettings = (): Settings => ({ server: "", vault: "", device: "", secretId: "", ownsSecret: false });
 
 /** Unique per Obsidian vault where the app has it (appId, undocumented), else the vault's folder name. */
@@ -36,7 +40,7 @@ function platformName(): string {
 }
 
 export default class KumbuSyncPlugin extends Plugin {
-  data: PluginData = { settings: emptySettings(), state: emptyState() };
+  data: PluginData = { settings: emptySettings(), state: emptyState(), announced: [] };
   engine: SyncEngine | null = null;
   api: KumbuApi | null = null;
   private hints: HintConnection | null = null;
@@ -170,6 +174,7 @@ export default class KumbuSyncPlugin extends Plugin {
     s.secretId = id;
     s.ownsSecret = ownsSecret;
     this.data.state = emptyState();
+    this.data.announced = [];
     await this.saveAll();
     await this.startSync();
   }
@@ -203,6 +208,7 @@ export default class KumbuSyncPlugin extends Plugin {
     s.secretId = "";
     s.ownsSecret = false;
     this.data.state = emptyState();
+    this.data.announced = [];
     await this.saveAll();
     this.statusBar?.hide();
     this.tab?.refresh();
@@ -266,7 +272,8 @@ export default class KumbuSyncPlugin extends Plugin {
       clock: windowClock,
       onStatus: (status) => this.statusChanged(status),
       onConflict: (original, copy) => {
-        new Notice(`Kumbu² Sync: ${original} was changed on both sides. Your text is in ${copy}.`);
+        const yours = attachmentKind(original) === null ? "Your text" : "Your version";
+        new Notice(`Kumbu² Sync: ${original} was changed on both sides. ${yours} is in ${copy}.`);
       },
       onAuthLost: () => this.authLost(),
       onFirstSyncDone: (summary) => new ResultModal(this.app, this.data.settings.vault, summary).open(),
@@ -278,7 +285,25 @@ export default class KumbuSyncPlugin extends Plugin {
 
   private statusChanged(status: SyncStatus): void {
     this.statusBar?.update(status);
-    if (!status.busy) this.tab?.refresh();
+    if (status.busy) return;
+    this.tab?.refresh();
+    this.announceTooLarge(status);
+  }
+
+  /** A notice once per file too large to sync; formats Kumbu² doesn't keep get none (a vault has many). */
+  private announceTooLarge(status: SyncStatus): void {
+    const result = announce(this.data.announced, status.notSynced, (path) => this.sizeOf(path));
+    if (!result.changed) return;
+    for (const text of result.notices) new Notice(text, NOTICE_MS);
+    this.data.announced = result.announced;
+    void this.saveAll();
+  }
+
+  /** The size on disk of the file at a synced path, which is NFC; the file system may spell it in NFD. */
+  private sizeOf(path: string): number | null {
+    const file = this.app.vault.getFileByPath(path)
+      ?? this.app.vault.getFiles().find((f) => f.path.normalize("NFC") === path);
+    return file?.stat.size ?? null;
   }
 
   private authLost(): void {
@@ -296,5 +321,6 @@ function normalise(raw: unknown): PluginData {
   return {
     settings: { ...emptySettings(), ...(data.settings ?? {}) },
     state: { ...emptyState(), ...(data.state ?? {}), bases: { ...(data.state?.bases ?? {}) } },
+    announced: Array.isArray(data.announced) ? data.announced.filter((p): p is string => typeof p === "string") : [],
   };
 }
