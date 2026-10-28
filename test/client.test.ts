@@ -72,8 +72,10 @@ describe("versions", () => {
     expect(http.last!.url).toBe("https://k.example/api/vaults/Work/versions?attachments=1");
   });
   test("versions sends If-None-Match and reads 304 as unchanged", async () => {
-    const http = fakeHttp({ status: 304 });
-    const answer = await api(http).versions(null, "s1");
+    const http = fakeHttp({ status: 200, body: { full: true, cursor: "c", state: "s1", damaged: 0, notes: [] } }, { status: 304 });
+    const client = api(http);
+    await client.versions(null, null);
+    const answer = await client.versions(null, "s1");
     expect(http.last!.headers["If-None-Match"]).toBe('"s1"');
     expect(answer).toMatchObject({ unchanged: true, full: true, state: "s1", entries: [] });
   });

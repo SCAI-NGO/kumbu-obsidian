@@ -80,9 +80,10 @@ export class VaultFiles implements LocalFiles {
       try {
         await this.app.vault.createBinary(path, bytes);
         return true;
-      } catch {
-        // Created by someone else between the check and the create.
-        return false;
+      } catch (e) {
+        // Created by someone else between the check and the create; any other failure is the caller's to see.
+        if (this.app.vault.getFileByPath(path)) return false;
+        throw e;
       }
     }
     if (expected === null) return false;

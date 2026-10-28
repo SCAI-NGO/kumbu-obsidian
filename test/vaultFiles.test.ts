@@ -214,6 +214,12 @@ describe("binary files", () => {
     expect(new Uint8Array(f.files.get("a.png")!)).toEqual(bytes(3));
   });
 
+  test("writeBinaryIf passes on a failed create that no other file explains", async () => {
+    const f = binaryApp({});
+    (f.app.vault as { createBinary: unknown }).createBinary = () => Promise.reject(new Error("The disk is full."));
+    await expect(new VaultFiles(f.app).writeBinaryIf("a.png", null, bytes(1).buffer)).rejects.toThrow("The disk is full.");
+  });
+
   test("writeBinaryIf with a version for a missing file writes nothing", async () => {
     const f = binaryApp({});
     expect(await new VaultFiles(f.app).writeBinaryIf("a.png", "aaaaaaaaaaaa", bytes(3).buffer)).toBe(false);

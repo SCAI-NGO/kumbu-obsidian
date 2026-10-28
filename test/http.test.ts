@@ -36,6 +36,16 @@ test("obsidianHttp sends an ArrayBuffer body as it is and returns the answer's b
   expect(r.bytes).toBe(answer);
 });
 
+test("an answer's text is decoded only when it is read", async () => {
+  let decoded = 0;
+  requestUrl.mockResolvedValue({ status: 200, headers: {}, arrayBuffer: new ArrayBuffer(4), get text(): string { decoded++; return "{}"; } });
+  const r = await obsidianHttp({ method: "GET", url: "https://k.example/api/files/Work/a.pdf", headers: {} });
+  expect(decoded).toBe(0);
+  expect(r.text).toBe("{}");
+  expect(r.text).toBe("{}");
+  expect(decoded).toBe(1);
+});
+
 test("a thrown requestUrl becomes OfflineError", async () => {
   requestUrl.mockRejectedValue(new Error("net::ERR_INTERNET_DISCONNECTED"));
   await expect(obsidianHttp({ method: "GET", url: "https://k.example/x", headers: {} })).rejects.toBeInstanceOf(OfflineError);

@@ -140,6 +140,21 @@ describe("server detection", () => {
     expect(await client.versions(null, "s")).toMatchObject({ unchanged: true, attachments: true });
   });
 
+  test("a fresh client sends no If-None-Match, so a restart with an unchanged vault still detects attachments", async () => {
+    const calls: HttpRequest[] = [];
+    // A server that answers 304 to the tag it has: the state the plugin kept from before the restart.
+    const http: HttpFn = (r) => {
+      calls.push(r);
+      if (r.headers["If-None-Match"] === '"s"') return Promise.resolve({ status: 304, headers: {}, text: "" });
+      const body = { full: true, cursor: "c", state: "s", damaged: 0, attachments: true, notes: [], deleted: [] };
+      return Promise.resolve({ status: 200, headers: {}, text: JSON.stringify(body) });
+    };
+    const client = api(http);
+    expect(await client.versions(null, "s")).toMatchObject({ unchanged: false, attachments: true });
+    expect(calls[0]!.headers["If-None-Match"]).toBeUndefined();
+    expect(await client.versions(null, "s")).toMatchObject({ unchanged: true, attachments: true });
+  });
+
   test("an old server is detected and attachments stay unsynced", async () => {
     const h = await harness({ synced: { "a.md": "one" }, localOnly: { "img/x.png": "png" }, oldServer: true });
     expect(h.engine.attachmentsSupported).toBe(false);

@@ -23,8 +23,8 @@ const WRONG_CODE = "This code is not valid (any more).";
 
 export class KumbuApi implements RemoteApi {
   private readonly server: string;
-  /** What the last versions answer said, for a 304, which says nothing. */
-  private attachments = false;
+  /** What the last versions answer said, for a 304, which says nothing; null until one has come. */
+  private attachments: boolean | null = null;
 
   constructor(private readonly http: HttpFn, server: string, private readonly vault: string, private readonly key: string) {
     this.server = trimServer(server);
@@ -38,9 +38,12 @@ export class KumbuApi implements RemoteApi {
     const query = "?attachments=1" + (since === null ? "" : `&since=${encodeURIComponent(since)}`);
     const headers: Record<string, string> = {};
     // The server answers 304 only to a full list, so the tag goes only with one.
-    if (since === null && state !== null) headers["If-None-Match"] = `"${state}"`;
+    // Not before an answer has said whether the server keeps attachments: a 304 couldn't tell.
+    if (since === null && state !== null && this.attachments !== null) headers["If-None-Match"] = `"${state}"`;
     const r = await this.send("GET", `/api/vaults/${encodeURIComponent(this.vault)}/versions${query}`, undefined, headers);
-    if (r.status === 304) return { full: true, entries: [], cursor: "", state, damaged: 0, unchanged: true, attachments: this.attachments };
+    if (r.status === 304) {
+      return { full: true, entries: [], cursor: "", state, damaged: 0, unchanged: true, attachments: this.attachments === true };
+    }
     if (r.status === 404) throw new AuthError(errorOf(r) ?? `This key can't open the vault ${this.vault} any more.`);
     expectOk(r);
     const view = parse<VersionsView>(r);
@@ -51,7 +54,7 @@ export class KumbuApi implements RemoteApi {
     if (!view.full) for (const p of view.deleted ?? []) entries.push({ path: fromApiPath(this.vault, p), version: null });
     return {
       full: view.full, entries, cursor: view.cursor, state: view.state, damaged: view.damaged, unchanged: false,
-      attachments: this.attachments,
+      attachments: this.attachments === true,
     };
   }
 

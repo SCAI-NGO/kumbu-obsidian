@@ -19,14 +19,29 @@ export const obsidianHttp: HttpFn = async (r) => {
   } catch (e) {
     throw new OfflineError(e instanceof Error ? e.message : "The request failed.");
   }
-  let text = "";
   let bytes: ArrayBuffer | undefined;
   try {
-    // The body as it came: an attachment's bytes; the text below is the same body decoded.
+    // The body as it came: an attachment's bytes.
     bytes = response.arrayBuffer;
-    text = response.text;
   } catch {
     // An answer without a body (204, 304).
   }
-  return { status: response.status, headers: response.headers, text, bytes };
+  let text: string | undefined;
+  return {
+    status: response.status,
+    headers: response.headers,
+    bytes,
+    // Decoded only when asked for: an attachment of up to 15 MB is never turned into a string it doesn't need.
+    get text(): string {
+      if (text === undefined) {
+        try {
+          text = response.text;
+        } catch {
+          // An answer without a body (204, 304).
+          text = "";
+        }
+      }
+      return text;
+    },
+  };
 };
