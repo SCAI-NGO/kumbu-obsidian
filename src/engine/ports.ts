@@ -50,6 +50,8 @@ export interface LocalFiles {
   /** The text the user sees: an open editor's unsaved text if there is one, else the file's. */
   read(path: string): Promise<string | null>;
   size(path: string): Promise<number | null>; // bytes on disk
+  /** Size in bytes and modification time (ms) on disk, null if there is no file. */
+  stat(path: string): Promise<FileStat | null>;
   /**
    * Writes only if the text the user sees (as `read` gives it, so unsaved typing in an editor counts) still has
    * version `expected` (null: the file must not exist). Returns false if it changed.
@@ -72,8 +74,15 @@ export interface LocalFiles {
   removeFolderIfEmpty(path: string): Promise<boolean>;
 }
 
+export interface FileStat { size: number; mtime: number; }
+
 export interface SyncState {
   bases: Record<string, Version>; // vault-relative path → agreed version
+  /**
+   * Attachment path → the stat it had when its bytes were last hashed, and their version: a file whose stat is the
+   * same is not read again only to find it unchanged. Optional: state saved before attachments has none.
+   */
+  hashed?: Record<string, FileStat & { version: Version }>;
   cursor: string | null; lastFullAt: string | null; lastSyncAt: string | null;
   /** The first sync's answer to its one question, kept until the first sync is done, so it is never asked twice. */
   pendingChoice?: "both" | "local" | "kumbu" | null;

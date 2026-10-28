@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
-import type { LocalFiles, Version } from "../src/engine/ports";
+import type { FileStat, LocalFiles, Version } from "../src/engine/ports";
 import { versionOfBytes, versionOfSync } from "../src/engine/version";
 
 export class NodeFiles implements LocalFiles {
@@ -69,6 +69,15 @@ export class NodeFiles implements LocalFiles {
   size(path: string): Promise<number | null> {
     try {
       return Promise.resolve(statSync(this.abs(path)).size);
+    } catch {
+      return Promise.resolve(null);
+    }
+  }
+
+  stat(path: string): Promise<FileStat | null> {
+    try {
+      const { size, mtimeMs } = statSync(this.abs(path));
+      return Promise.resolve({ size, mtime: mtimeMs });
     } catch {
       return Promise.resolve(null);
     }

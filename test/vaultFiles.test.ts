@@ -235,6 +235,16 @@ describe("binary files", () => {
     expect(f.trashed).toEqual(["a.png", "b.png"]);
   });
 
+  test("stat gives the size and modification time Obsidian has, null for a missing file", async () => {
+    const f = binaryApp({ "a.png": bytes(1, 2) });
+    const vault = f.app.vault as unknown as { getFileByPath: (p: string) => TFile | null };
+    const real = vault.getFileByPath;
+    vault.getFileByPath = (p) => { const file = real(p); if (file) file.stat = { size: 2, mtime: 1_700_000_000_000 }; return file; };
+    const files = new VaultFiles(f.app);
+    expect(await files.stat("a.png")).toEqual({ size: 2, mtime: 1_700_000_000_000 });
+    expect(await files.stat("b.png")).toBeNull();
+  });
+
   test("writeBinaryIf with a version for a missing file writes nothing", async () => {
     const f = binaryApp({});
     expect(await new VaultFiles(f.app).writeBinaryIf("a.png", "aaaaaaaaaaaa", bytes(3).buffer)).toBe(false);

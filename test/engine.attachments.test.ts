@@ -209,7 +209,7 @@ describe("limits and what stays on the list", () => {
     expect(h.server.files.size).toBe(0);
   });
 
-  test("a conflict that replaces a file too large here takes it off the list", async () => {
+  test("a different version in Kumbu² doesn't come over a file too large here, nor is it read", async () => {
     const h = await harness({ synced: { "a.md": "one" } });
     await synced(h, "x.pdf", pdf(10));
     h.files.binaries.set("x.pdf", pdf(MAX_ATTACHMENT_BYTES + 1));
@@ -217,10 +217,34 @@ describe("limits and what stays on the list", () => {
     await settle(h, 2000);
     expect(h.engine.status().notSynced).toEqual([{ path: "x.pdf", reason: "too-large" }]);
     await h.server.seedFile("x.pdf", pdf(20));
+    const reads = vi.spyOn(h.files, "readBinary");
     await h.engine.check(false);
+    await h.engine.check(true);
+    expect(reads).not.toHaveBeenCalled();
+    expect(bytesOf(h, "x.pdf")?.byteLength).toBe(MAX_ATTACHMENT_BYTES + 1);
+    expect(h.conflicts).toEqual([]);
+    expect(h.server.files.get("x.pdf")?.bytes).toEqual(pdf(20));
+    expect(h.engine.status().notSynced).toEqual([{ path: "x.pdf", reason: "too-large" }]);
+
+    // Once it fits again it is decided against its old base: both changed, so a conflict copy keeps it.
+    h.files.binaries.set("x.pdf", pdf(30));
+    h.engine.localChanged("x.pdf");
+    await settle(h, 2000);
     expect(bytesOf(h, "x.pdf")).toEqual(pdf(20));
-    // The copy holds the large bytes now, and is what stays on the list.
-    expect(h.engine.status().notSynced.map((n) => [n.path, n.reason])).toEqual([[h.conflicts[0]![1], "too-large"]]);
+    expect(bytesOf(h, h.conflicts[0]![1])).toEqual(pdf(30));
+    expect(h.engine.status().notSynced).toEqual([]);
+  });
+
+  test("a file too large here is not trashed when Kumbu² trashes it", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.pdf", pdf(10));
+    h.files.binaries.set("x.pdf", pdf(MAX_ATTACHMENT_BYTES + 1));
+    await h.server.removeFile("x.pdf", await versionOfBytes(pdf(10)));
+    await h.engine.check(false);
+    await h.engine.check(true);
+    expect(bytesOf(h, "x.pdf")?.byteLength).toBe(MAX_ATTACHMENT_BYTES + 1);
+    expect(h.files.systemTrash).toEqual([]);
+    expect(h.engine.status().notSynced).toEqual([{ path: "x.pdf", reason: "too-large" }]);
   });
 
   test("the limit is 15 MB exactly", async () => {
@@ -344,5 +368,261 @@ describe("the first sync", () => {
     const summary = await h.engine.firstSync(() => Promise.resolve("local"));
     expect(summary).toMatchObject({ uploaded: 1, downloaded: 0 });
     expect(h.server.files.get("differs.png")?.bytes).toEqual(png(3));
+  });
+});
+
+describe("a file the server lists but can't hand over", () => {
+  const CANT_OPEN = "Couldn't sync: Kumbu² can't open this file just now; it is tried again with every sync.";
+  /** readFile answers as for a missing file (the server's 404) for `path` until the returned function is called. */
+  function unserved(h: Harness, path: string): () => void {
+    const real = h.server.readFile.bind(h.server);
+    let broken = true;
+    h.server.readFile = (p) => (broken && p === path ? Promise.resolve(null) : real(p));
+    return () => { broken = false; };
+  }
+
+  test("is kept here and listed, not trashed, and arrives once it opens", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    const cursor = h.state.state.cursor;
+    await h.server.seedFile("x.png", png(2));
+    const repair = unserved(h, "x.png");
+    await h.engine.check(false);
+    await h.engine.check(false);
+    expect(bytesOf(h, "x.png")).toEqual(png(1));
+    expect(h.files.systemTrash).toEqual([]);
+    expect(h.state.state.bases["x.png"]).toBe(await versionOfBytes(png(1)));
+    expect(h.state.state.cursor).toBe(cursor);
+    expect(h.engine.status().notSynced).toEqual([{ path: "x.png", reason: "rejected", detail: CANT_OPEN }]);
+
+    repair();
+    vi.setSystemTime(Date.now() + 60_000);
+    await h.engine.check(false);
+    expect(bytesOf(h, "x.png")).toEqual(png(2));
+    expect(h.engine.status().notSynced).toEqual([]);
+    expect(h.state.state.cursor).not.toBe(cursor);
+  });
+
+  test("keeps a changed local file whole in a conflict", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    await h.server.seedFile("x.png", png(2));
+    h.files.binaries.set("x.png", png(3));
+    unserved(h, "x.png");
+    await h.engine.check(false);
+    expect([...h.files.binaries.keys()]).toEqual(["x.png"]);
+    expect(bytesOf(h, "x.png")).toEqual(png(3));
+    expect(h.conflicts).toEqual([]);
+    expect(h.engine.status().notSynced).toEqual([{ path: "x.png", reason: "rejected", detail: CANT_OPEN }]);
+  });
+
+  test("is trashed here when the next answer says it was deleted", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    await h.server.seedFile("x.png", png(2));
+    unserved(h, "x.png");
+    await h.engine.check(false);
+    await h.server.removeFile("x.png", await versionOfBytes(png(2)));
+    await h.engine.check(false);
+    expect(h.files.systemTrash).toEqual(["x.png"]);
+    expect(h.engine.status().notSynced).toEqual([]);
+  });
+
+  test("doesn't hold up a first sync, whose next check asks for everything again", async () => {
+    const h = await harness({ start: false, localOnly: { "a.md": "a" }, remoteFiles: { "x.png": png(2) } });
+    const repair = unserved(h, "x.png");
+    const summary = await h.engine.firstSync(() => Promise.resolve("both"));
+    expect(summary).toMatchObject({ uploaded: 1, downloaded: 0, notSynced: [{ path: "x.png", reason: "rejected", detail: CANT_OPEN }] });
+    expect(h.state.state.cursor).toBeNull();
+    repair();
+    await h.engine.check(false);
+    expect(bytesOf(h, "x.png")).toEqual(png(2));
+    expect(h.engine.status().notSynced).toEqual([]);
+  });
+});
+
+describe("an attachment is read only when it may have changed", () => {
+  /** Counts the reads of `path` from now on. */
+  function countReads(h: Harness, path: string): () => number {
+    const spy = vi.spyOn(h.files, "readBinary");
+    return () => spy.mock.calls.filter(([p]) => p === path).length;
+  }
+
+  test("a full check doesn't read an unchanged file, and reads it once its stat changes", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    const reads = countReads(h, "x.png");
+    await h.engine.check(true);
+    expect(reads()).toBe(0);
+    // Kept with the bases, so a restart doesn't read it either.
+    await h.engine.stop();
+    await h.engine.start();
+    expect(reads()).toBe(0);
+
+    h.files.touch("x.png");
+    await h.engine.check(true);
+    expect(reads()).toBe(1);
+    await h.engine.check(true);
+    expect(reads()).toBe(1);
+
+    // Changed without an event (by another program, while Obsidian was closed): the new size gives it away.
+    h.files.binaries.set("x.png", png(1, 2));
+    await h.engine.check(true);
+    expect(reads()).toBe(2);
+    expect(h.server.files.get("x.png")?.bytes).toEqual(png(1, 2));
+    expect(h.server.count("putFile")).toBe(1);
+  });
+
+  test("news from the server is decided with the local bytes read", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    const reads = countReads(h, "x.png");
+    await h.server.seedFile("x.png", png(2));
+    await h.engine.check(false);
+    expect(reads()).toBe(1);
+    expect(bytesOf(h, "x.png")).toEqual(png(2));
+  });
+
+  test("a file deleted here is forgotten", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    expect(h.state.state.hashed?.["x.png"]).toBeDefined();
+    h.files.userDelete("x.png");
+    h.engine.localDeleted("x.png");
+    await settle(h);
+    expect(h.state.state.hashed?.["x.png"]).toBeUndefined();
+  });
+});
+
+describe("a file too large here and the first sync", () => {
+  const big = () => pdf(MAX_ATTACHMENT_BYTES + 1);
+
+  for (const choice of ["both", "local", "kumbu"] as const) {
+    test(`stays as it is and out of the question with “${choice}”`, async () => {
+      const h = await harness({ start: false, localOnly: { "a.md": "a" }, remoteFiles: { "big.pdf": pdf(10), "d.png": png(2) } });
+      h.files.binaries.set("big.pdf", big());
+      h.files.binaries.set("d.png", png(3));
+      const reads = vi.spyOn(h.files, "readBinary");
+      let differing: string[] = [];
+      await h.engine.firstSync((plan) => { differing = plan.differing; return Promise.resolve(choice); });
+      expect(differing).toEqual(["d.png"]);
+      expect(reads.mock.calls.filter(([p]) => p === "big.pdf")).toEqual([]);
+      expect(bytesOf(h, "big.pdf")?.byteLength).toBe(MAX_ATTACHMENT_BYTES + 1);
+      expect(h.files.trash).not.toContain("big.pdf");
+      expect(h.conflicts.map(([original]) => original)).not.toContain("big.pdf");
+      expect(h.server.files.get("big.pdf")?.bytes).toEqual(pdf(10));
+      expect(h.engine.status().notSynced).toEqual([{ path: "big.pdf", reason: "too-large" }]);
+    });
+  }
+
+  for (const choice of ["local", "kumbu"] as const) {
+    test(`stays as it is when it grows while “${choice}” is being chosen`, async () => {
+      const h = await harness({ start: false, remoteFiles: { "x.pdf": pdf(10) } });
+      h.files.binaries.set("x.pdf", pdf(20));
+      await h.engine.firstSync(() => {
+        h.files.binaries.set("x.pdf", big());
+        return Promise.resolve(choice);
+      });
+      expect(bytesOf(h, "x.pdf")?.byteLength).toBe(MAX_ATTACHMENT_BYTES + 1);
+      expect(h.files.trash).toEqual([]);
+      expect(h.server.files.get("x.pdf")?.bytes).toEqual(pdf(10));
+      expect(h.engine.status().notSynced).toEqual([{ path: "x.pdf", reason: "too-large" }]);
+    });
+  }
+});
+
+describe("across support and renames", () => {
+  test("a server that stops keeping attachments for a while loses nothing, and learns of a deletion meanwhile", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    await synced(h, "y.png", png(2));
+    // Past the server's overlap, so the answer after support returns doesn't name x.png.
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    h.server.attachmentsSupported = false;
+    await h.engine.check(true);
+    expect(h.engine.status().notSynced).toEqual([{ path: "x.png", reason: "attachment" }, { path: "y.png", reason: "attachment" }]);
+    h.files.userDelete("x.png");
+    h.engine.localDeleted("x.png");
+    await settle(h);
+    await h.engine.check(true);
+    expect(h.files.systemTrash).toEqual([]);
+    expect(bytesOf(h, "y.png")).toEqual(png(2));
+    expect(h.server.files.has("x.png")).toBe(true);
+
+    h.server.attachmentsSupported = true;
+    await h.engine.check(false);
+    expect(h.server.files.has("x.png")).toBe(false);
+    expect(h.server.files.get("y.png")?.bytes).toEqual(png(2));
+    expect(bytesOf(h, "y.png")).toEqual(png(2));
+    await h.engine.check(true);
+    expect(h.server.count("removeFile")).toBe(1);
+    expect(h.server.count("putFile")).toBe(0);
+    expect(h.engine.status().notSynced).toEqual([]);
+    expect(Object.keys(h.state.state.bases).sort()).toEqual(["a.md", "y.png"]);
+  });
+
+  test("a rename the server can't move (a.png → a.jpg) is a delete and a create, and the refusal is listed", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "a.png", png(1));
+    const realPut = h.server.putFile.bind(h.server);
+    let refused = 0;
+    h.server.putFile = (path, bytes, base) => {
+      if (path !== "a.jpg") return realPut(path, bytes, base);
+      refused++;
+      return Promise.reject(new RejectedError("The content of a.jpg is not a JPEG image.", 400));
+    };
+    h.files.userRename("a.png", "a.jpg");
+    h.engine.localRenamed("a.png", "a.jpg");
+    await settle(h);
+    expect(h.server.calls.map((c) => c.method)).toEqual(["move", "removeFile"]);
+    expect(refused).toBe(1);
+    // In Kumbu²'s trash, and whole here under its new name.
+    expect(h.server.files.has("a.png")).toBe(false);
+    expect(bytesOf(h, "a.jpg")).toEqual(png(1));
+    expect(h.engine.status().notSynced).toEqual([{ path: "a.jpg", reason: "rejected", detail: "The content of a.jpg is not a JPEG image." }]);
+    await h.engine.check(true);
+    expect(refused).toBe(1);
+  });
+
+  test("a rename within one format (a.jpg → a.jpeg) is a move", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 1]);
+    await synced(h, "a.jpg", jpeg);
+    h.files.userRename("a.jpg", "a.jpeg");
+    h.engine.localRenamed("a.jpg", "a.jpeg");
+    await settle(h);
+    expect(h.server.calls.map((c) => c.method)).toEqual(["move"]);
+    expect(h.server.files.get("a.jpeg")?.bytes).toEqual(jpeg);
+  });
+
+  test("a download that loses the race with a local change keeps that change in a conflict copy", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    await synced(h, "x.png", png(1));
+    await h.server.seedFile("x.png", png(2));
+    const realWrite = h.files.writeBinaryIf.bind(h.files);
+    let raced = false;
+    h.files.writeBinaryIf = (path, expected, bytes) => {
+      if (path === "x.png" && !raced) {
+        raced = true;
+        h.files.binaries.set("x.png", png(9));
+      }
+      return realWrite(path, expected, bytes);
+    };
+    await h.engine.check(false);
+    expect(raced).toBe(true);
+    expect(bytesOf(h, "x.png")).toEqual(png(2));
+    const copy = h.conflicts[0]![1];
+    expect(bytesOf(h, copy)).toEqual(png(9));
+    expect(h.server.files.get(copy)?.bytes).toEqual(png(9));
+  });
+
+  test("the damaged count names files too on a server with attachments", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    h.server.damaged = 2;
+    await h.engine.check(true);
+    expect(h.engine.status().notSynced).toContainEqual({
+      path: "", reason: "damaged-vault",
+      detail: "2 notes or files in Kumbu² can't be opened, so no local file is trashed because a note or file is missing.",
+    });
   });
 });

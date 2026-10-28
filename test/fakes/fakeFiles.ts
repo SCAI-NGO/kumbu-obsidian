@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // In-memory LocalFiles. `caseInsensitive` makes lookups ignore case, as on macOS, Windows and Android.
-import type { LocalFiles, Version } from "../../src/engine/ports";
+import type { FileStat, LocalFiles, Version } from "../../src/engine/ports";
 import { versionOf, versionOfBytes, versionOfSync } from "../../src/engine/version";
 
 export class FakeFiles implements LocalFiles {
@@ -20,6 +20,12 @@ export class FakeFiles implements LocalFiles {
   /** Runs when the engine trashes a file, before any check there: a keystroke between the engine's read and the trash. */
   beforeTrash: ((path: string) => void) | null = null;
   writes = 0;
+  /**
+   * Modification times: a file's changes whenever what it holds is replaced (a new string or array), so a test that
+   * sets a map entry changes it as a write to disk would. `touch` changes it without new bytes.
+   */
+  private readonly stamps = new Map<string, { held: string | Uint8Array; mtime: number }>();
+  private ticks = 0;
 
   constructor(initial: Record<string, string> = {}) {
     for (const [p, t] of Object.entries(initial)) this.files.set(p, t);
@@ -61,6 +67,23 @@ export class FakeFiles implements LocalFiles {
   size(path: string): Promise<number | null> {
     const p = this.existing(path);
     return Promise.resolve(p === undefined ? null : this.bytesOf(p).byteLength);
+  }
+
+  stat(path: string): Promise<FileStat | null> {
+    const p = this.existing(path);
+    if (p === undefined) return Promise.resolve(null);
+    const held = this.binaries.get(p) ?? this.files.get(p)!;
+    let stamp = this.stamps.get(p);
+    if (stamp?.held !== held) {
+      stamp = { held, mtime: ++this.ticks };
+      this.stamps.set(p, stamp);
+    }
+    return Promise.resolve({ size: this.bytesOf(p).byteLength, mtime: stamp.mtime });
+  }
+
+  /** A new modification time, the bytes unchanged. */
+  touch(path: string): void {
+    this.stamps.delete(path);
   }
 
   readBinary(path: string): Promise<ArrayBuffer | null> {

@@ -6,8 +6,8 @@ import { makePlan, type Choice, type FirstSyncSummary, type MergePlan } from "./
 import { attachmentKind, conflictCopyPath, eligibility } from "./paths";
 import {
   AuthError, OfflineError, RejectedError,
-  type Clock, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi, type StateStore,
-  type SyncState, type SyncStatus, type Version,
+  type Clock, type FileStat, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi,
+  type StateStore, type SyncState, type SyncStatus, type Version,
 } from "./ports";
 import { SerialQueue } from "./queue";
 import { byteSize, MAX_BYTES, versionOf, versionOfBytes } from "./version";
@@ -43,6 +43,13 @@ const UNEXPECTED = "!";
 const TOO_LARGE = "!too-large";
 const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$/;
 
+/**
+ * Kumbu² lists the path with a version but doesn't hand its bytes over (they don't open, or the vault is locked): not a
+ * deletion. The path is listed and decided again from the old cursor; a real deletion comes in the next answer.
+ */
+class UnservedError extends Error {}
+const CANT_OPEN = "Kumbu² can't open this file just now; it is tried again with every sync.";
+
 /** What an operation found out: decide again with this remote version. */
 interface Again { remote: Version | null; }
 
@@ -70,6 +77,8 @@ export class SyncEngine {
   private readonly rejected = new Map<string, { version: Version; detail: string }>();
   private caseClashes = new Map<string, string>();
   private damaged = 0;
+  /** A path couldn't be decided in this check (UnservedError): the check keeps its old cursor. */
+  private pathFailed = false;
   private supportsAttachments = false;
   private readonly conflicts = new Set<string>();
   private connection: ConnectionMode = "polling";
@@ -131,9 +140,11 @@ export class SyncEngine {
       notSynced.push({ path, reason: "case-clash", detail: `Differs only in case from ${winner}.` });
     }
     if (this.damaged > 0) {
+      // With attachments the server counts damaged files too.
+      const what = this.supportsAttachments ? ["note or file", "notes or files"] : ["note", "notes"];
       notSynced.push({
         path: "", reason: "damaged-vault",
-        detail: `${this.damaged} ${this.damaged === 1 ? "note" : "notes"} in Kumbu² can't be opened, so no local file is trashed because a note is missing.`,
+        detail: `${this.damaged} ${what[this.damaged === 1 ? 0 : 1]} in Kumbu² can't be opened, so no local file is trashed because a ${what[0]} is missing.`,
       });
     }
     return {
@@ -264,7 +275,7 @@ export class SyncEngine {
     const answer = await this.o.remote.versions(full ? null : this.state.cursor, null);
     const { remote, keys } = await this.resolve(answer);
     const damagedPossible = answer.full && answer.damaged > 0;
-    let pathFailed = false;
+    this.pathFailed = false;
     for (const key of keys) {
       if (this.stopped) return;
       const base = this.state.bases[key] ?? null;
@@ -277,19 +288,20 @@ export class SyncEngine {
         if (e instanceof OfflineError || e instanceof AuthError) throw e;
         // One path's local trouble doesn't hold up the others; it is listed and tried again by every check.
         this.rejected.set(key, { version: UNEXPECTED, detail: `Couldn't sync: ${e instanceof Error ? e.message : "unknown error"}` });
-        pathFailed = true;
+        this.pathFailed = true;
       }
     }
     // The old cursor stays while a path failed, so the next check asks for it again.
-    if (!pathFailed) await this.finishCheck(answer);
+    if (!this.pathFailed) await this.finishCheck(answer);
   }
 
-  private async finishCheck(answer: VersionsAnswer): Promise<void> {
+  /** `keepCursor`: a path failed, so the next check asks from the old cursor again (a full one after a first sync). */
+  private async finishCheck(answer: VersionsAnswer, keepCursor = false): Promise<void> {
     // Every answer counts the vault's damaged notes; a damaged path is in neither list, so it is never "deleted".
     this.damaged = answer.damaged;
     if (answer.full) this.state.lastFullAt = new Date(this.o.clock.now()).toISOString();
     // Only after every path is done: a check that fails halfway asks again from the old cursor.
-    this.state.cursor = answer.cursor;
+    if (!keepCursor) this.state.cursor = answer.cursor;
     this.state.lastSyncAt = new Date(this.o.clock.now()).toISOString();
     await this.save();
   }
@@ -331,7 +343,8 @@ export class SyncEngine {
 
     const keys = new Set<string>([...remote.keys(), ...this.dirty]);
     if (isFull || newlySupported) {
-      if (isFull) for (const k of Object.keys(this.state.bases)) keys.add(k);
+      // Newly supported: an attachment deleted here while the server kept none is deleted there now.
+      for (const k of Object.keys(this.state.bases)) if (isFull || isFile(k)) keys.add(k);
       for (const [k, path] of localKeys) {
         if (!isFull && !isFile(k)) continue;
         const winner = owner.get(fold(k)) ?? k;
@@ -396,10 +409,17 @@ export class SyncEngine {
   private async runFirstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
     const answer = await this.o.remote.versions(null, null);
     const { remote, keys } = await this.resolve(answer);
+    this.pathFailed = false;
     const sides = new Map<string, { local: Version | null; remote: Version | null }>();
     for (const key of keys) {
       if (this.state.bases[key] !== undefined) continue;
-      sides.set(key, { local: await this.localVersion(key, this.localPathOf.get(key) ?? key), remote: remote.get(key) ?? null });
+      const local = await this.localVersion(key, this.localPathOf.get(key) ?? key);
+      // Stays as it is whatever the choice, so it is no part of the question: syncPath lists it.
+      if (local === TOO_LARGE) {
+        this.tooLarge.add(key);
+        continue;
+      }
+      sides.set(key, { local, remote: remote.get(key) ?? null });
     }
     const plan = makePlan(sides, this.status().notSynced);
     let choice: Choice = this.state.pendingChoice ?? "both";
@@ -442,13 +462,15 @@ export class SyncEngine {
     }
     if (this.stopped) return null;
     delete this.state.pendingChoice;
-    await this.finishCheck(answer);
+    await this.finishCheck(answer, this.pathFailed);
     return { ...counts, conflictCopies: this.copiesMade - copiesBefore, notSynced: this.status().notSynced };
   }
 
   /** The local text (or file) replaces Kumbu²'s, which stays in its history. False if it ended another way. */
   private async keepLocal(key: string, remote: Version): Promise<boolean> {
-    const { content, version: local } = await this.readLocal(key, this.localPathOf.get(key) ?? key);
+    const path = this.localPathOf.get(key) ?? key;
+    if (await this.tooLargeToRead(key, path)) return false;
+    const { content, version: local } = await this.readLocal(key, path);
     if (content === null || local === null) {
       await this.syncPath(key, remote, false);
       return false;
@@ -469,6 +491,7 @@ export class SyncEngine {
   /** Kumbu²'s text replaces the local file, which goes to Obsidian's .trash first. */
   private async keepKumbu(key: string): Promise<boolean> {
     const path = this.localPathOf.get(key) ?? key;
+    if (await this.tooLargeToRead(key, path)) return false;
     const theirs = await this.readRemote(key);
     if (theirs === null) {
       await this.syncPath(key, null, false);
@@ -497,6 +520,7 @@ export class SyncEngine {
       if (COPY_NAME.test(key)) this.conflicts.add(key);
     }
     for (const copy of [...this.conflicts]) if (!found.has(copy)) this.conflicts.delete(copy);
+    if (full) for (const key of Object.keys(this.state.hashed ?? {})) if (!found.has(key)) delete this.state.hashed![key];
     return found;
   }
 
@@ -508,11 +532,18 @@ export class SyncEngine {
     for (let round = 0; round < MAX_ROUNDS; round++) {
       if (this.stopped) return;
       const path = this.localPathOf.get(key) ?? key;
-      if (await this.tooLargeToRead(key, path, remote)) {
+      const stat = isFile(key) ? await this.o.local.stat(path) : null;
+      if (await this.tooLargeToRead(key, path, stat)) {
         this.dirty.delete(key);
         return;
       }
-      const { content, version: local } = await this.readLocal(key, path);
+      if (this.unchangedSinceHashed(key, stat, remote)) {
+        // What reading it would have found: nothing to do.
+        if (this.rejected.get(key)?.version === UNEXPECTED) this.rejected.delete(key);
+        this.dirty.delete(key);
+        return;
+      }
+      const { content, version: local } = await this.readLocal(key, path, stat);
       // Gone here: nothing left that could be too large.
       if (local === null) this.tooLarge.delete(key);
       const base = this.state.bases[key] ?? null;
@@ -524,6 +555,12 @@ export class SyncEngine {
       try {
         again = await this.act(key, path, content, local, remote, action);
       } catch (e) {
+        if (e instanceof UnservedError) {
+          // Dirty still: tried again by the next check, which asks from the old cursor.
+          this.rejected.set(key, { version: UNEXPECTED, detail: `Couldn't sync: ${e.message}` });
+          this.pathFailed = true;
+          return;
+        }
         if (!(e instanceof RejectedError)) throw e;
         this.rejected.set(key, { version: local ?? "", detail: e.message });
         this.dirty.delete(key);
@@ -539,15 +576,24 @@ export class SyncEngine {
   }
 
   /**
-   * An attachment over its limit is not read while the server has no news for it: all that could be due is its
-   * upload, which the limit refuses, so it is listed as too large without holding its bytes (a 200 MB PDF on a phone).
+   * An attachment over its limit is never read (a 200 MB PDF on a phone), and no decision overwrites or trashes it: it
+   * stays as it is, listed as too large, and a different version in Kumbu² doesn't come over it (the web app's smaller
+   * copy of a photo keeps the photo's name). Once it fits again, it is decided against the base it had.
    */
-  private async tooLargeToRead(key: string, path: string, remote: Version | null): Promise<boolean> {
-    if (!isFile(key) || remote !== (this.state.bases[key] ?? null)) return false;
-    const size = await this.o.local.size(path);
+  private async tooLargeToRead(key: string, path: string, stat?: FileStat | null): Promise<boolean> {
+    if (!isFile(key)) return false;
+    const size = stat === undefined ? await this.o.local.size(path) : (stat?.size ?? null);
     if (size === null || size <= MAX_ATTACHMENT_BYTES) return false;
     this.tooLarge.add(key);
     return true;
+  }
+
+  /** Kumbu² is at the base, and the attachment's stat is what it was when its bytes were last found at the base. */
+  private unchangedSinceHashed(key: string, stat: FileStat | null, remote: Version | null): boolean {
+    const base = this.state.bases[key];
+    const hashed = this.state.hashed?.[key];
+    return stat !== null && base !== undefined && remote === base && hashed !== undefined && hashed.version === base
+      && hashed.size === stat.size && hashed.mtime === stat.mtime;
   }
 
   private async act(
@@ -572,7 +618,11 @@ export class SyncEngine {
 
       case "download": {
         const theirs = await this.readRemote(key);
-        if (theirs === null) return { remote: null };
+        if (theirs === null) {
+          // An attachment listed with a version: its bytes don't open, which is no deletion (a note's text is its record).
+          if (isFile(key)) throw new UnservedError(CANT_OPEN);
+          return { remote: null };
+        }
         if (!(await this.writeLocalIf(path, local, theirs.content))) return { remote: theirs.version };
         this.localPathOf.set(key, path);
         this.forgetProblems(key);
@@ -664,7 +714,7 @@ export class SyncEngine {
    */
   private async conflictFile(key: string, path: string, bytes: ArrayBuffer, local: Version, remote: Version | null): Promise<Again | undefined> {
     const theirs = await this.o.remote.readFile(key);
-    if (theirs === null) return { remote: null };
+    if (theirs === null) throw new UnservedError(CANT_OPEN);
     if (theirs.version !== remote) return { remote: theirs.version };
     const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, new Date(this.o.clock.now())));
     if (!(await this.o.local.writeBinaryIf(copy, null, bytes))) return { remote };
@@ -706,11 +756,19 @@ export class SyncEngine {
     return path;
   }
 
-  /** The text the user sees, or an attachment's bytes, with its version. */
-  private async readLocal(key: string, path: string): Promise<{ content: Content | null; version: Version | null }> {
+  /**
+   * The text the user sees, or an attachment's bytes, with its version. An attachment's version is kept with the stat
+   * it had before the read (`stat`, else asked now): a change during the read gives a new stat, so it is read again.
+   */
+  private async readLocal(key: string, path: string, stat?: FileStat | null): Promise<{ content: Content | null; version: Version | null }> {
     if (isFile(key)) {
+      const before = stat === undefined ? await this.o.local.stat(path) : stat;
       const bytes = await this.o.local.readBinary(path);
-      return { content: bytes, version: bytes === null ? null : await versionOfBytes(bytes) };
+      const version = bytes === null ? null : await versionOfBytes(bytes);
+      const hashed = (this.state.hashed ??= {});
+      if (version !== null && before !== null) hashed[key] = { size: before.size, mtime: before.mtime, version };
+      else delete hashed[key];
+      return { content: bytes, version };
     }
     const text = await this.o.local.read(path);
     return { content: text, version: text === null ? null : await versionOf(text) };

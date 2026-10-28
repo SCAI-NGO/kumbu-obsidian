@@ -144,8 +144,8 @@ export class FakeServer implements RemoteApi {
     await this.enter("move", [from, to]);
     const file = this.attachmentsSupported ? this.files.get(from) : undefined;
     if (file) {
-      // As the server's mv: an attachment keeps its format, so its extension.
-      if (this.files.has(to) || this.notes.has(to) || kindOf(to) !== kindOf(from)) return { ok: false };
+      // As the server's mv (a 409): an attachment keeps its format, so its media type ("a.jpg" → "a.jpeg" may move).
+      if (this.files.has(to) || this.notes.has(to) || mediaTypeOf(to) !== mediaTypeOf(from)) return { ok: false };
       this.files.delete(from);
       this.files.set(to, { ...file, lastWriter: this.deviceWriter + " (mv)" });
       this.touch(from);
@@ -224,4 +224,9 @@ function kindOf(path: string): FileKind {
   const lower = path.toLowerCase();
   if (lower.endsWith(".pdf")) return "pdf";
   return lower.endsWith(".md") ? "note" : "image";
+}
+
+function mediaTypeOf(path: string): string {
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return ext === "jpg" ? "jpeg" : ext;
 }

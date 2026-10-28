@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // LocalFiles over Obsidian's Vault and FileManager.
 import { MarkdownView, Platform, TFile, type App, type Editor } from "obsidian";
-import type { LocalFiles, Version } from "../engine/ports";
+import type { FileStat, LocalFiles, Version } from "../engine/ports";
 import { versionOfBytes, versionOfSync } from "../engine/version";
 
 export class VaultFiles implements LocalFiles {
@@ -25,6 +25,11 @@ export class VaultFiles implements LocalFiles {
 
   size(path: string): Promise<number | null> {
     return Promise.resolve(this.app.vault.getFileByPath(path)?.stat.size ?? null);
+  }
+
+  stat(path: string): Promise<FileStat | null> {
+    const file = this.app.vault.getFileByPath(path);
+    return Promise.resolve(file ? { size: file.stat.size, mtime: file.stat.mtime } : null);
   }
 
   async writeIf(path: string, expected: Version | null, content: string): Promise<boolean> {
