@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // In-memory LocalFiles. `caseInsensitive` makes lookups ignore case, as on macOS, Windows and Android.
+import { isMarker } from "../../src/engine/paths";
 import type { FileStat, LocalFiles, Version } from "../../src/engine/ports";
 import { versionOf, versionOfBytes, versionOfSync } from "../../src/engine/version";
 
@@ -14,6 +15,8 @@ export class FakeFiles implements LocalFiles {
   /** Folders with no file in them, which a map of files can't show: made by the user, or left behind by a file. */
   readonly folders = new Set<string>();
   readonly removedFolders: string[] = [];
+  /** Folders a write of this LocalFiles made (they weren't there before); madeFolder takes each out once. */
+  readonly madeHere = new Set<string>();
   caseInsensitive = false;
   /** Runs inside writeIf after the check and before the write, to model a race the real adapter can't have. */
   beforeWrite: ((path: string) => void) | null = null;
@@ -55,8 +58,13 @@ export class FakeFiles implements LocalFiles {
     else this.files.set(to, text!);
   }
 
+  /** As Obsidian's index: nothing with a dot segment. */
   list(): Promise<string[]> {
-    return Promise.resolve([...this.files.keys(), ...this.binaries.keys()]);
+    return Promise.resolve(this.paths().filter((p) => !p.split("/").some((s) => s.startsWith("."))));
+  }
+
+  listMarkers(): Promise<string[]> {
+    return Promise.resolve(this.paths().filter(isMarker));
   }
 
   read(path: string): Promise<string | null> {
@@ -93,11 +101,14 @@ export class FakeFiles implements LocalFiles {
 
   async writeBinaryIf(path: string, expected: Version | null, bytes: ArrayBuffer): Promise<boolean> {
     const p = this.existing(path);
+    // A marker's content is never compared: it exists or it doesn't.
+    if (isMarker(path) && (expected !== null || p !== undefined)) return expected !== null && p !== undefined;
     const now = p === undefined ? null : await versionOfBytes(this.bytesOf(p));
     if (now !== expected) return false;
     if (p === undefined && this.clashes(path)) return false;
     this.beforeWrite?.(path);
     this.writes++;
+    if (p === undefined) this.madeFoldersFor(path);
     this.files.delete(p ?? path);
     this.binaries.set(p ?? path, new Uint8Array(bytes.slice(0)));
     return true;
@@ -110,6 +121,7 @@ export class FakeFiles implements LocalFiles {
     if (p === undefined && this.clashes(path)) return false;
     this.beforeWrite?.(path);
     this.writes++;
+    if (p === undefined) this.madeFoldersFor(path);
     this.binaries.delete(p ?? path);
     this.files.set(p ?? path, content);
     if (p !== undefined && this.editors.has(p)) this.editors.set(p, content);
@@ -133,6 +145,11 @@ export class FakeFiles implements LocalFiles {
   async trashBinaryIf(path: string, expected: Version): Promise<boolean> {
     this.beforeTrash?.(path);
     const p = this.existing(path);
+    if (p !== undefined && isMarker(p)) {
+      // Holds nothing worth keeping: removed, not trashed, whatever its content.
+      this.forget(p);
+      return true;
+    }
     if (p === undefined || (await versionOfBytes(this.bytesOf(p))) !== expected) return false;
     this.remove(path, this.systemTrash);
     return true;
@@ -144,12 +161,37 @@ export class FakeFiles implements LocalFiles {
   }
 
   removeFolderIfEmpty(path: string): Promise<boolean> {
-    const inside = (p: string) => p.startsWith(`${path}/`);
-    const empty = ![...this.files.keys(), ...this.binaries.keys()].some(inside) && ![...this.folders].some(inside);
-    if (!this.folders.has(path) || !empty) return Promise.resolve(false);
+    if (!this.emptyFolder(path)) return Promise.resolve(false);
     this.folders.delete(path);
     this.removedFolders.push(path);
     return Promise.resolve(true);
+  }
+
+  isEmptyFolder(path: string): Promise<boolean> {
+    return Promise.resolve(this.emptyFolder(path));
+  }
+
+  madeFolder(path: string): boolean {
+    return this.madeHere.delete(path);
+  }
+
+  private emptyFolder(path: string): boolean {
+    const inside = (p: string) => p.startsWith(`${path}/`);
+    return this.folders.has(path) && !this.paths().some(inside) && ![...this.folders].some(inside);
+  }
+
+  /** Each folder above a path about to be created that isn't there yet: the write makes it. */
+  private madeFoldersFor(path: string): void {
+    const segments = path.split("/");
+    for (let i = 1; i < segments.length; i++) {
+      const folder = segments.slice(0, i).join("/");
+      const exists = this.folders.has(folder) || this.paths().some((p) => p.startsWith(`${folder}/`));
+      if (!exists) this.madeHere.add(folder);
+    }
+  }
+
+  private paths(): string[] {
+    return [...this.files.keys(), ...this.binaries.keys()];
   }
 
   private remove(path: string, into: string[]): void {

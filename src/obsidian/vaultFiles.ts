@@ -14,6 +14,19 @@ export class VaultFiles implements LocalFiles {
     return Promise.resolve(this.app.vault.getFiles().map((f) => f.path));
   }
 
+  // Not yet through the adapter, which sees dot files: until then no marker is found, and no folder counts as empty.
+  listMarkers(): Promise<string[]> {
+    return Promise.resolve([]);
+  }
+
+  isEmptyFolder(): Promise<boolean> {
+    return Promise.resolve(false);
+  }
+
+  madeFolder(): boolean {
+    return false;
+  }
+
   /** The text the user sees: an open editor's, saved or not (Obsidian saves about 2 s after typing), else the file's. */
   async read(path: string): Promise<string | null> {
     const file = this.app.vault.getFileByPath(path);

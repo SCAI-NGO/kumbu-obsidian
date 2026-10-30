@@ -3,14 +3,14 @@
 import { conflictCopyText } from "./conflict";
 import { decide, type Action } from "./decide";
 import { makePlan, type Choice, type FirstSyncSummary, type MergePlan } from "./firstSync";
-import { attachmentKind, conflictCopyPath, eligibility } from "./paths";
+import { attachmentKind, conflictCopyPath, eligibility, isMarker } from "./paths";
 import {
   AuthError, OfflineError, RejectedError,
   type Clock, type FileStat, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi,
   type StateStore, type SyncState, type SyncStatus, type Version,
 } from "./ports";
 import { SerialQueue } from "./queue";
-import { byteSize, MAX_BYTES, versionOf, versionOfBytes } from "./version";
+import { byteSize, MARKER_VERSION, MAX_BYTES, versionOf, versionOfBytes } from "./version";
 
 export interface EngineOptions {
   vault: string; device: string; local: LocalFiles; remote: RemoteApi; state: StateStore; clock: Clock;
@@ -59,8 +59,11 @@ const keyOf = (path: string) => path.normalize("NFC");
 /** A note's text or an attachment's bytes. */
 type Content = string | ArrayBuffer;
 
-/** A PDF or an image: its bytes go through the binary ports, and its version is of the bytes. */
-const isFile = (path: string) => attachmentKind(path) !== null;
+/**
+ * A PDF, an image or a folder marker: its bytes go through the binary ports. Its version is of the bytes, but a
+ * marker's is always MARKER_VERSION: it holds nothing, so only whether it exists counts.
+ */
+const isFile = (path: string) => attachmentKind(path) !== null || isMarker(path);
 
 export class SyncEngine {
   private readonly o: EngineOptions;
@@ -152,7 +155,8 @@ export class SyncEngine {
     }
     return {
       mode: this.offline ? "offline" : this.connection,
-      notSynced,
+      // A marker is never shown: the folder it keeps is what the user sees.
+      notSynced: notSynced.filter((n) => !isMarker(n.path)),
       conflicts: [...this.conflicts].sort(),
       busy: this.queue.busy,
       lastSyncAt: this.state.lastSyncAt,
@@ -326,7 +330,7 @@ export class SyncEngine {
     const remote = new Map<string, Version | null>();
     // A server without attachments lists notes only. With them, a deleted path comes without a kind (the server's
     // `deleted` is a list of paths): its extension says what it was, so syncPath treats it as notes' deletions are.
-    const kinds = new Set([undefined, "note", ...(answer.attachments ? ["image", "pdf"] : [])]);
+    const kinds = new Set([undefined, "note", ...(answer.attachments ? ["image", "pdf", "folder"] : [])]);
     const entries = answer.entries
       .filter((e) => kinds.has(e.kind))
       .map((e) => ({ key: keyOf(e.path), version: e.version }))
@@ -413,7 +417,8 @@ export class SyncEngine {
     const { remote, keys } = await this.resolve(answer);
     const sides = new Map<string, { local: Version | null; remote: Version | null }>();
     for (const key of keys) {
-      if (this.state.bases[key] !== undefined) continue;
+      // A marker is never shown, nor asked about (both sides' is the same): the normal decision below syncs it.
+      if (this.state.bases[key] !== undefined || isMarker(key)) continue;
       const local = await this.localVersion(key, this.localPathOf.get(key) ?? key);
       // Stays as it is whatever the choice, so it is no part of the question: syncPath lists it.
       if (local === TOO_LARGE) {
@@ -511,7 +516,9 @@ export class SyncEngine {
   private async scanLocal(full: boolean): Promise<Map<string, string>> {
     const found = new Map<string, string>();
     if (full) this.attachments.clear();
-    for (const path of await this.o.local.list()) {
+    // Markers are dot files, so in no list: looked for only by a full check, and only where they sync.
+    const markers = full && this.supportsAttachments ? await this.o.local.listMarkers() : [];
+    for (const path of [...(await this.o.local.list()), ...markers]) {
       const kind = eligibility(path, this.supportsAttachments);
       if (kind === "attachment") this.attachments.add(path);
       if (kind !== "sync") continue;
@@ -585,7 +592,8 @@ export class SyncEngine {
    * copy of a photo keeps the photo's name). Once it fits again, it is decided against the base it had.
    */
   private async tooLargeToRead(key: string, path: string, stat?: FileStat | null): Promise<boolean> {
-    if (!isFile(key)) return false;
+    // A note is read whatever its size; a marker never is.
+    if (attachmentKind(key) === null) return false;
     const size = stat === undefined ? await this.o.local.size(path) : (stat?.size ?? null);
     if (size === null || size <= MAX_ATTACHMENT_BYTES) return false;
     this.tooLarge.add(key);
@@ -765,6 +773,11 @@ export class SyncEngine {
    * it had before the read (`stat`, else asked now): a change during the read gives a new stat, so it is read again.
    */
   private async readLocal(key: string, path: string, stat?: FileStat | null): Promise<{ content: Content | null; version: Version | null }> {
+    if (isMarker(key)) {
+      // Never read: a marker with bytes in it (another tool's) is still the empty marker, and is sent empty.
+      const found = (stat === undefined ? await this.o.local.stat(path) : stat) !== null;
+      return found ? { content: new ArrayBuffer(0), version: MARKER_VERSION } : { content: null, version: null };
+    }
     if (isFile(key)) {
       const before = stat === undefined ? await this.o.local.stat(path) : stat;
       const bytes = await this.o.local.readBinary(path);
@@ -780,7 +793,7 @@ export class SyncEngine {
 
   /** readLocal's version, without reading an attachment over its limit (TOO_LARGE): only a comparison needs it. */
   private async localVersion(key: string, path: string): Promise<Version | null> {
-    if (isFile(key) && ((await this.o.local.size(path)) ?? 0) > MAX_ATTACHMENT_BYTES) return TOO_LARGE;
+    if (attachmentKind(key) !== null && ((await this.o.local.size(path)) ?? 0) > MAX_ATTACHMENT_BYTES) return TOO_LARGE;
     return (await this.readLocal(key, path)).version;
   }
 

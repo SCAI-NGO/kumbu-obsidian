@@ -5,6 +5,7 @@ import {
   type DeleteResult, type FileDeleteResult, type FileKind, type FilePutResult, type MoveResult, type PutResult,
   type RemoteApi, type RemoteEntry, type RemoteFile, type RemoteNote, type Version, type VersionsAnswer,
 } from "../../src/engine/ports";
+import { isMarker } from "../../src/engine/paths";
 import { normaliseText, versionOf, versionOfBytes } from "../../src/engine/version";
 
 type Method = keyof RemoteApi;
@@ -19,6 +20,8 @@ export class FakeServer implements RemoteApi {
   readonly files = new Map<string, StoredFile>();
   /** False: a server from before attachments, which ignores attachments=1 and answers 404 on /api/files. */
   attachmentsSupported = true;
+  /** False: a server with attachments from before folder markers, which answers 400 to a marker's GET and PUT. */
+  markersSupported = true;
   /** Every path touched, with the server time of the touch, for since answers. */
   readonly touches: { path: string; at: number }[] = [];
   readonly calls: { method: Method; args: unknown[] }[] = [];
@@ -53,6 +56,12 @@ export class FakeServer implements RemoteApi {
       return Promise.resolve(previous);
     }
     return this.store(path, content, "agent", at);
+  }
+
+  /** An agent removes an attachment or a marker (rm), stamped with the clock. */
+  agentRemoveFile(path: string): void {
+    this.files.delete(path);
+    this.touch(path);
   }
 
   /** The stored note stops opening (as the server's damaged notes): gone from every list, counted in damaged. */
@@ -163,6 +172,7 @@ export class FakeServer implements RemoteApi {
 
   async readFile(path: string): Promise<RemoteFile | null> {
     await this.enter("readFile", [path]);
+    this.refuseMarker(path);
     const f = this.attachmentsSupported ? this.files.get(path) : undefined;
     return f ? { bytes: f.bytes.slice().buffer, version: f.version } : null;
   }
@@ -170,6 +180,8 @@ export class FakeServer implements RemoteApi {
   async putFile(path: string, bytes: ArrayBuffer, base: Version | null): Promise<FilePutResult> {
     await this.enter("putFile", [path, bytes, base]);
     if (!this.attachmentsSupported) throw new RejectedError("Not found.", 404);
+    this.refuseMarker(path);
+    if (isMarker(path) && bytes.byteLength > 0) throw new RejectedError("A .vaultkeep keeps its folder and holds nothing; send it empty.", 400);
     const existing = this.files.get(path);
     if (existing && existing.version !== base) return { ok: false, conflict: { version: existing.version } };
     await this.storeFile(path, new Uint8Array(bytes), this.deviceWriter);
@@ -184,6 +196,12 @@ export class FakeServer implements RemoteApi {
     this.files.delete(path);
     this.touch(path);
     return { ok: true };
+  }
+
+  private refuseMarker(path: string): void {
+    if (isMarker(path) && this.attachmentsSupported && !this.markersSupported) {
+      throw new RejectedError(`/Work/${path} is neither a note nor a file Kumbu² keeps.`, 400);
+    }
   }
 
   private async storeFile(path: string, bytes: Uint8Array, writer: string, at = this.now()): Promise<void> {
@@ -221,6 +239,7 @@ export class FakeServer implements RemoteApi {
 }
 
 function kindOf(path: string): FileKind {
+  if (isMarker(path)) return "folder";
   const lower = path.toLowerCase();
   if (lower.endsWith(".pdf")) return "pdf";
   return lower.endsWith(".md") ? "note" : "image";

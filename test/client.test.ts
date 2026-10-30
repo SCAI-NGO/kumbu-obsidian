@@ -71,6 +71,11 @@ describe("versions", () => {
     expect(await api(http).versions(null, null)).toMatchObject({ full: true, damaged: 2, entries: [{ path: "a.md", version: "aaaaaaaaaaaa" }] });
     expect(http.last!.url).toBe("https://k.example/api/vaults/Work/versions?attachments=1");
   });
+  test("a folder marker comes with its kind", async () => {
+    const http = fakeHttp({ status: 200, body: { full: true, cursor: "c", state: "s", damaged: 0, attachments: true,
+      notes: [{ path: "/Work/Drafts/.vaultkeep", version: "e3b0c44298fc", kind: "folder" }] } });
+    expect((await api(http).versions(null, null)).entries).toEqual([{ path: "Drafts/.vaultkeep", version: "e3b0c44298fc", kind: "folder" }]);
+  });
   test("versions sends If-None-Match and reads 304 as unchanged", async () => {
     const http = fakeHttp({ status: 200, body: { full: true, cursor: "c", state: "s1", damaged: 0, notes: [] } }, { status: 304 });
     const client = api(http);
