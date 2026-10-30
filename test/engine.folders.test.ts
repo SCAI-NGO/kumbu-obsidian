@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { Choice, MergePlan } from "../src/engine/firstSync";
 import { MARKER_VERSION } from "../src/engine/version";
-import { harness, type Harness } from "./fakes/harness";
+import { harness, settle, type Harness } from "./fakes/harness";
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -147,5 +147,62 @@ describe("markers sync both ways", () => {
     expect(h.state.state.bases).toMatchObject({ "A/.vaultkeep": MARKER_VERSION, "B/.vaultkeep": MARKER_VERSION, "C/.vaultkeep": MARKER_VERSION });
     expect(h.server.files.has("A/.vaultkeep")).toBe(true);
     expect(h.files.binaries.get("B/.vaultkeep")).toEqual(EMPTY);
+  });
+});
+
+describe("a server without folder markers", () => {
+  async function refused() {
+    const h = await harness({ start: false, localOnly: { "a.md": "a" } });
+    h.server.markersSupported = false;
+    h.files.binaries.set("A/.vaultkeep", EMPTY);
+    h.files.binaries.set("B/.vaultkeep", EMPTY);
+    return h;
+  }
+
+  test("a server that refuses markers is asked once per start and lists nothing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await refused();
+    await h.engine.start();
+    expect(h.server.count("putFile")).toBe(1);
+    expect(h.server.notes.has("a.md")).toBe(true);
+    expect(h.engine.status().notSynced).toEqual([]);
+    expect(h.state.state.cursor).not.toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    await h.engine.check(true);
+    expect(h.server.count("putFile")).toBe(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    await h.engine.stop();
+    await h.engine.start();
+    expect(h.server.count("putFile")).toBe(2);
+    warn.mockRestore();
+  });
+
+  test("a refused marker is never retried by the debounce", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await refused();
+    await h.engine.start();
+    h.engine.localChanged("A/.vaultkeep");
+    await settle(h, 2000);
+    expect(h.server.count("putFile")).toBe(1);
+    warn.mockRestore();
+  });
+
+  test("a refused removal of a marker is final too", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness();
+    await synced(h, "A/.vaultkeep");
+    h.server.markersSupported = false;
+    h.files.binaries.delete("A/.vaultkeep");
+    h.engine.localChanged("A/.vaultkeep");
+    await settle(h, 2000);
+    expect(h.server.count("removeFile")).toBe(1);
+    expect(h.engine.status().notSynced).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    h.engine.localChanged("A/.vaultkeep");
+    await settle(h, 2000);
+    expect(h.server.count("removeFile")).toBe(1);
+    warn.mockRestore();
   });
 });

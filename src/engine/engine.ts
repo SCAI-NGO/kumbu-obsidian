@@ -78,6 +78,8 @@ export class SyncEngine {
   private readonly attachments = new Set<string>();
   private readonly tooLarge = new Set<string>();
   private readonly rejected = new Map<string, { version: Version; detail: string }>();
+  /** An older server answered a marker with a 400: none is sent again until the next start. */
+  private markersRefused = false;
   private caseClashes = new Map<string, string>();
   private damaged = 0;
   /**
@@ -109,6 +111,7 @@ export class SyncEngine {
   async start(): Promise<void> {
     this.state = await this.o.state.load();
     this.stopped = false;
+    this.markersRefused = false;
     await this.check(true);
   }
 
@@ -539,6 +542,10 @@ export class SyncEngine {
       this.dirty.delete(key);
       return;
     }
+    if (isMarker(key) && this.markersRefused) {
+      this.dirty.delete(key);
+      return;
+    }
     for (let round = 0; round < MAX_ROUNDS; round++) {
       if (this.stopped) return;
       const path = this.localPathOf.get(key) ?? key;
@@ -573,6 +580,15 @@ export class SyncEngine {
           return;
         }
         if (!(e instanceof RejectedError)) throw e;
+        if (isMarker(key)) {
+          // A server from before folder markers knows no such file: final for this run, and nothing to list.
+          if (!this.markersRefused) {
+            console.warn(`Kumbu² Sync: this server keeps no empty folders (${e.message}); they stay in Obsidian only until the server is updated.`);
+          }
+          this.markersRefused = true;
+          this.dirty.delete(key);
+          return;
+        }
         this.rejected.set(key, { version: local ?? "", detail: e.message });
         this.dirty.delete(key);
         return;

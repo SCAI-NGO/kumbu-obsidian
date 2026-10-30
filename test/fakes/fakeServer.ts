@@ -190,6 +190,7 @@ export class FakeServer implements RemoteApi {
 
   async removeFile(path: string, base: Version): Promise<FileDeleteResult> {
     await this.enter("removeFile", [path, base]);
+    this.refuseMarker(path);
     const existing = this.attachmentsSupported ? this.files.get(path) : undefined;
     if (!existing) return { ok: false, conflict: null };
     if (existing.version !== base) return { ok: false, conflict: { version: existing.version } };
