@@ -1,17 +1,50 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // LocalFiles over Obsidian's Vault and FileManager.
 import { MarkdownView, Platform, TFile, type App, type Editor } from "obsidian";
+import { FOLDER_SETTLE_MS } from "../engine/engine";
+import { eligibility, isMarker, MARKER } from "../engine/paths";
 import type { FileStat, LocalFiles, Version } from "../engine/ports";
 import { versionOfBytes, versionOfSync } from "../engine/version";
+
+/**
+ * How long a folder made here counts as made here. The engine asks once its wait is over, or never (offline, stopped,
+ * first sync): an answer kept longer would make a folder the user makes later under the same name look like ours.
+ */
+const MADE_FOLDER_MS = FOLDER_SETTLE_MS + 60_000;
 
 export class VaultFiles implements LocalFiles {
   /** Where "Plan.md" and "plan.md" are one file: macOS, Windows and the phones; Linux keeps them apart. */
   readonly caseInsensitive = Platform.isMacOS || Platform.isWin || Platform.isMobileApp;
 
+  /** Folders ensureFolder made, with when: see MADE_FOLDER_MS. */
+  private readonly made = new Map<string, number>();
+
   constructor(private readonly app: App) {}
 
   list(): Promise<string[]> {
     return Promise.resolve(this.app.vault.getFiles().map((f) => f.path));
+  }
+
+  // Obsidian's index has no dot files, so a marker is never in it: every marker goes through the adapter, which reads
+  // the disk. Through the index, a marker downloaded here would look deleted on the next full check.
+  async listMarkers(): Promise<string[]> {
+    const markers: string[] = [];
+    for (const folder of this.app.vault.getAllFolders(false)) {
+      const marker = `${folder.path}/${MARKER}`;
+      if (eligibility(marker, true) === "sync" && (await this.app.vault.adapter.exists(marker))) markers.push(marker);
+    }
+    return markers;
+  }
+
+  async isEmptyFolder(path: string): Promise<boolean> {
+    const folder = this.app.vault.getFolderByPath(path);
+    return folder !== null && folder.children.length === 0 && (await this.emptyOnDisk(path));
+  }
+
+  madeFolder(path: string): boolean {
+    const at = this.made.get(path);
+    this.made.delete(path);
+    return at !== undefined && Date.now() - at <= MADE_FOLDER_MS;
   }
 
   /** The text the user sees: an open editor's, saved or not (Obsidian saves about 2 s after typing), else the file's. */
@@ -23,13 +56,15 @@ export class VaultFiles implements LocalFiles {
     return view ? view.editor.getValue() : this.app.vault.read(file);
   }
 
-  size(path: string): Promise<number | null> {
-    return Promise.resolve(this.app.vault.getFileByPath(path)?.stat.size ?? null);
+  async size(path: string): Promise<number | null> {
+    if (isMarker(path)) return (await this.markerStat(path))?.size ?? null;
+    return this.app.vault.getFileByPath(path)?.stat.size ?? null;
   }
 
-  stat(path: string): Promise<FileStat | null> {
+  async stat(path: string): Promise<FileStat | null> {
+    if (isMarker(path)) return this.markerStat(path);
     const file = this.app.vault.getFileByPath(path);
-    return Promise.resolve(file ? { size: file.stat.size, mtime: file.stat.mtime } : null);
+    return file ? { size: file.stat.size, mtime: file.stat.mtime } : null;
   }
 
   async writeIf(path: string, expected: Version | null, content: string): Promise<boolean> {
@@ -69,6 +104,7 @@ export class VaultFiles implements LocalFiles {
   }
 
   async readBinary(path: string): Promise<ArrayBuffer | null> {
+    if (isMarker(path)) return (await this.markerStat(path)) ? this.app.vault.adapter.readBinary(path) : null;
     const file = this.app.vault.getFileByPath(path);
     return file ? this.app.vault.readBinary(file) : null;
   }
@@ -78,6 +114,14 @@ export class VaultFiles implements LocalFiles {
    * write: only another program writing the same file in that moment could come between them.
    */
   async writeBinaryIf(path: string, expected: Version | null, bytes: ArrayBuffer): Promise<boolean> {
+    if (isMarker(path)) {
+      // Its content is never compared: only whether it exists.
+      const exists = (await this.markerStat(path)) !== null;
+      if (expected !== null || exists) return expected !== null && exists;
+      await this.ensureFolder(path);
+      await this.app.vault.adapter.writeBinary(path, bytes);
+      return true;
+    }
     const file = this.app.vault.getFileByPath(path);
     if (!file) {
       if (expected !== null) return false;
@@ -117,6 +161,12 @@ export class VaultFiles implements LocalFiles {
 
   /** trashIf for an attachment: no editor holds it, so its bytes on disk are what is checked. */
   async trashBinaryIf(path: string, expected: Version): Promise<boolean> {
+    if (isMarker(path)) {
+      // Holds nothing worth a trash: removed, whatever its content.
+      if (!(await this.markerStat(path))) return false;
+      await this.app.vault.adapter.remove(path);
+      return true;
+    }
     const file = this.app.vault.getFileByPath(path);
     if (!file) return false;
     if ((await versionOfBytes(await this.app.vault.readBinary(file))) !== expected) return false;
@@ -134,11 +184,20 @@ export class VaultFiles implements LocalFiles {
   async removeFolderIfEmpty(path: string): Promise<boolean> {
     const folder = this.app.vault.getFolderByPath(path);
     if (!folder || folder.children.length > 0) return false;
-    // Obsidian's index leaves out dot files (".DS_Store", a ".git" folder); the adapter lists what is on disk.
-    const listed = await this.app.vault.adapter.list(path);
-    if (listed.files.length > 0 || listed.folders.length > 0) return false;
+    if (!(await this.emptyOnDisk(path))) return false;
     await this.app.vault.delete(folder);
     return true;
+  }
+
+  /** Obsidian's index leaves out dot files (".DS_Store", a ".git" folder); the adapter lists what is on disk. */
+  private async emptyOnDisk(path: string): Promise<boolean> {
+    const listed = await this.app.vault.adapter.list(path);
+    return listed.files.length === 0 && listed.folders.length === 0;
+  }
+
+  private async markerStat(path: string): Promise<FileStat | null> {
+    const stat = await this.app.vault.adapter.stat(path);
+    return stat?.type === "file" ? { size: stat.size, mtime: stat.mtime } : null;
   }
 
   private editorsOf(file: TFile): MarkdownView[] {
@@ -149,12 +208,17 @@ export class VaultFiles implements LocalFiles {
   }
 
   private async ensureFolder(path: string): Promise<void> {
+    for (const [folder, at] of this.made) if (Date.now() - at > MADE_FOLDER_MS) this.made.delete(folder);
     const segments = path.split("/").slice(0, -1);
     for (let i = 1; i <= segments.length; i++) {
       const folder = segments.slice(0, i).join("/");
       const existing = this.app.vault.getAbstractFileByPath(folder);
       if (existing instanceof TFile) throw new Error(`${folder} is a file, not a folder.`);
-      if (!existing) await this.app.vault.createFolder(folder);
+      if (!existing) {
+        // Before the create: Obsidian reports the new folder to the engine as soon as it is made.
+        this.made.set(folder, Date.now());
+        await this.app.vault.createFolder(folder);
+      }
     }
   }
 }

@@ -43,12 +43,23 @@ export function attachmentKind(path: string): "image" | "pdf" | null {
   return ATTACHMENTS[extensionOf(path)] ?? null;
 }
 
+/** The empty file that keeps a folder alive in Kumbu², which holds files only. */
+export const MARKER = ".vaultkeep";
+
+/** A marker file: named exactly MARKER, with at least one folder above it. Says nothing about dot folders. */
+export function isMarker(path: string): boolean {
+  const segments = path.split("/");
+  return segments.length > 1 && segments[segments.length - 1] === MARKER;
+}
+
 /**
  * `attachments`: the server keeps PDFs and images, so they sync as notes do. "attachment" is any other file outside
  * dot folders, which stays on the "not synced" list.
  */
 export function eligibility(path: string, attachments = false): "sync" | "attachment" | "ignored" {
   const segments = path.split("/");
+  // Tested before the dot-segment rule: the marker itself is a dot file, and only its folders must be free of dots.
+  if (isMarker(path)) return attachments && !segments.slice(0, -1).some((s) => s.startsWith(".")) ? "sync" : "ignored";
   if (segments.some((s) => s.startsWith("."))) return "ignored";
   if (path.toLowerCase().endsWith(".md")) return "sync";
   return attachments && attachmentKind(path) !== null ? "sync" : "attachment";

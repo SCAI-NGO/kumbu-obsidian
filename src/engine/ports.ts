@@ -2,8 +2,8 @@
 // The engine's ports and the types every part of the plugin shares.
 
 export type Version = string; // 12 hex chars
-/** What a path holds on a server with attachments; a server without them gives no kind. */
-export type FileKind = "note" | "image" | "pdf";
+/** What a path holds on a server with attachments; a server without them gives no kind. "folder": a folder marker. */
+export type FileKind = "note" | "image" | "pdf" | "folder";
 export interface RemoteEntry { path: string; version: Version | null; kind?: FileKind; } // vault-relative path; null = deleted
 export interface VersionsAnswer {
   full: boolean; entries: RemoteEntry[]; cursor: string; state: string | null; damaged: number; unchanged: boolean;
@@ -46,20 +46,30 @@ export interface RemoteApi {
 export interface LocalFiles {
   /** True where "Plan.md" and "plan.md" are one file (macOS, Windows, Android, iOS). */
   readonly caseInsensitive: boolean;
-  list(): Promise<string[]>; // vault-relative paths of all files, any extension
+  list(): Promise<string[]>; // vault-relative paths of all files, any extension; never a folder marker
+  /**
+   * Vault-relative paths of every folder marker (`<folder>/.vaultkeep`) on disk outside dot folders: dot files are in
+   * no `list()`, so markers are looked for on their own.
+   */
+  listMarkers(): Promise<string[]>;
   /** The text the user sees: an open editor's unsaved text if there is one, else the file's. */
   read(path: string): Promise<string | null>;
-  size(path: string): Promise<number | null>; // bytes on disk
-  /** Size in bytes and modification time (ms) on disk, null if there is no file. */
+  /** Bytes on disk. For a folder marker only whether it exists counts, never its content (in this and every port below). */
+  size(path: string): Promise<number | null>;
+  /** Size in bytes and modification time (ms) on disk, null if there is no file. A marker: whether it exists. */
   stat(path: string): Promise<FileStat | null>;
   /**
    * Writes only if the text the user sees (as `read` gives it, so unsaved typing in an editor counts) still has
    * version `expected` (null: the file must not exist). Returns false if it changed.
    */
   writeIf(path: string, expected: Version | null, content: string): Promise<boolean>;
-  /** The file's bytes as they are on disk (attachments), null if there is none. */
+  /** The file's bytes as they are on disk (attachments), null if there is none. A marker's are never compared. */
   readBinary(path: string): Promise<ArrayBuffer | null>;
-  /** writeIf for bytes: writes only if the file's bytes still have version `expected` (null: it must not exist). */
+  /**
+   * writeIf for bytes: writes only if the file's bytes still have version `expected` (null: it must not exist).
+   * A marker's content is never compared: with `expected` null it is created if absent (false if it exists); with any
+   * other `expected` nothing is written, and the answer is whether it exists.
+   */
   writeBinaryIf(path: string, expected: Version | null, bytes: ArrayBuffer): Promise<boolean>;
   trashToLocal(path: string): Promise<void>; // Obsidian's .trash, always (first-sync "Keep Kumbu²")
   /**
@@ -67,11 +77,18 @@ export interface LocalFiles {
    * still has version `expected`, checked right before trashing. Returns false, and keeps the file, if it changed.
    */
   trashIf(path: string, expected: Version): Promise<boolean>;
-  /** trashIf for an attachment: by the user's trash setting, only if the file's bytes still have version `expected`. */
+  /**
+   * trashIf for an attachment: by the user's trash setting, only if the file's bytes still have version `expected`.
+   * A marker holds nothing worth keeping: it is removed if present, whatever its content; false if there is none.
+   */
   trashBinaryIf(path: string, expected: Version): Promise<boolean>;
   rename(from: string, to: string): Promise<void>;
   /** Deletes the folder if it has nothing in it at all, dot files included. True if it deleted it. */
   removeFolderIfEmpty(path: string): Promise<boolean>;
+  /** The folder exists and has nothing in it at all, dot files included. */
+  isEmptyFolder(path: string): Promise<boolean>;
+  /** True once for a folder this LocalFiles made itself (for a download); asking forgets it. */
+  madeFolder(path: string): boolean;
 }
 
 export interface FileStat { size: number; mtime: number; }

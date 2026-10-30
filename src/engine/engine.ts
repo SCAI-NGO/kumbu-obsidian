@@ -3,14 +3,14 @@
 import { conflictCopyText } from "./conflict";
 import { decide, type Action } from "./decide";
 import { makePlan, type Choice, type FirstSyncSummary, type MergePlan } from "./firstSync";
-import { attachmentKind, conflictCopyPath, eligibility } from "./paths";
+import { attachmentKind, conflictCopyPath, eligibility, isMarker, MARKER } from "./paths";
 import {
   AuthError, OfflineError, RejectedError,
   type Clock, type FileStat, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi,
   type StateStore, type SyncState, type SyncStatus, type Version,
 } from "./ports";
 import { SerialQueue } from "./queue";
-import { byteSize, MAX_BYTES, versionOf, versionOfBytes } from "./version";
+import { byteSize, MARKER_VERSION, MAX_BYTES, versionOf, versionOfBytes } from "./version";
 
 export interface EngineOptions {
   vault: string; device: string; local: LocalFiles; remote: RemoteApi; state: StateStore; clock: Clock;
@@ -30,6 +30,9 @@ export const MAX_ATTACHMENT_BYTES = 15_728_640;
 export function limitOf(path: string): number {
   return attachmentKind(path) === null ? MAX_BYTES : MAX_ATTACHMENT_BYTES;
 }
+
+/** How long a folder made here waits before it is looked at: Obsidian's "New folder" names it a moment later. */
+export const FOLDER_SETTLE_MS = 5000;
 
 const DEBOUNCE_MS = 2000;
 const FULL_AFTER_MS = 25 * 24 * 3600_000;
@@ -59,8 +62,11 @@ const keyOf = (path: string) => path.normalize("NFC");
 /** A note's text or an attachment's bytes. */
 type Content = string | ArrayBuffer;
 
-/** A PDF or an image: its bytes go through the binary ports, and its version is of the bytes. */
-const isFile = (path: string) => attachmentKind(path) !== null;
+/**
+ * A PDF, an image or a folder marker: its bytes go through the binary ports. Its version is of the bytes, but a
+ * marker's is always MARKER_VERSION: it holds nothing, so only whether it exists counts.
+ */
+const isFile = (path: string) => attachmentKind(path) !== null || isMarker(path);
 
 export class SyncEngine {
   private readonly o: EngineOptions;
@@ -68,6 +74,8 @@ export class SyncEngine {
   private state: SyncState = { bases: {}, cursor: null, lastFullAt: null, lastSyncAt: null };
   private stopped = true;
   private readonly debounces = new Map<string, unknown>();
+  /** Folders made here waiting out FOLDER_SETTLE_MS, by key. */
+  private readonly folderWaits = new Map<string, unknown>();
   /** Paths with local work not yet done, retried by every check until it succeeds. */
   private readonly dirty = new Set<string>();
   /** Key → the path as the file system spells it (NFD on some, or another case). */
@@ -75,6 +83,8 @@ export class SyncEngine {
   private readonly attachments = new Set<string>();
   private readonly tooLarge = new Set<string>();
   private readonly rejected = new Map<string, { version: Version; detail: string }>();
+  /** An older server answered a marker with a 400: none is sent again until the next start. */
+  private markersRefused = false;
   private caseClashes = new Map<string, string>();
   private damaged = 0;
   /**
@@ -106,6 +116,7 @@ export class SyncEngine {
   async start(): Promise<void> {
     this.state = await this.o.state.load();
     this.stopped = false;
+    this.markersRefused = false;
     await this.check(true);
   }
 
@@ -114,6 +125,8 @@ export class SyncEngine {
     this.stopped = true;
     for (const h of this.debounces.values()) this.o.clock.clearTimeout(h);
     this.debounces.clear();
+    for (const h of this.folderWaits.values()) this.o.clock.clearTimeout(h);
+    this.folderWaits.clear();
     this.cancelRetry();
     await this.queue.idle();
   }
@@ -152,7 +165,8 @@ export class SyncEngine {
     }
     return {
       mode: this.offline ? "offline" : this.connection,
-      notSynced,
+      // A marker is never shown: the folder it keeps is what the user sees.
+      notSynced: notSynced.filter((n) => !isMarker(n.path)),
       conflicts: [...this.conflicts].sort(),
       busy: this.queue.busy,
       lastSyncAt: this.state.lastSyncAt,
@@ -235,6 +249,54 @@ export class SyncEngine {
       await this.syncPath(fk, this.state.bases[fk] ?? null, false);
       await this.syncPath(tk, this.state.bases[tk] ?? null, false);
     });
+  }
+
+  /**
+   * A folder made here: once it has waited FOLDER_SETTLE_MS and is still empty, and this plugin didn't make it, it
+   * gets a marker. Only while running and online: the full check can't tell an empty folder from one older than the
+   * plugin, so a folder made at any other time keeps no marker.
+   */
+  localFolderCreated(path: string): void {
+    if (this.stopped) return;
+    const key = keyOf(path);
+    this.cancelFolderWait(key);
+    this.folderWaits.set(key, this.o.clock.setTimeout(() => {
+      this.folderWaits.delete(key);
+      // Made during the first sync: as one made before it, not kept.
+      if (this.firstSyncChoose !== null) return;
+      void this.run(async () => {
+        const marker = `${path}/${MARKER}`;
+        const keep = !this.stopped && !this.offline && this.firstSyncChoose === null && this.supportsAttachments
+          && !this.markersRefused && eligibility(marker, true) === "sync"
+          && !this.o.local.madeFolder(path) && (await this.o.local.isEmptyFolder(path));
+        if (keep && (await this.o.local.writeBinaryIf(marker, null, new ArrayBuffer(0)))) this.localChanged(marker);
+        return false;
+      });
+    }, FOLDER_SETTLE_MS));
+  }
+
+  /** A folder renamed here: its wait starts afresh under the new name, and every marker below it moves. */
+  localFolderRenamed(from: string, to: string): void {
+    if (this.stopped) return;
+    const fk = keyOf(from);
+    if (this.folderWaits.has(fk)) {
+      this.cancelFolderWait(fk);
+      this.localFolderCreated(to);
+    }
+    // Also a new marker still waiting for its debounce or uploading ("New folder" renamed after the wait): its rename
+    // is queued behind the upload, so it moves once its base is there, or the new name is uploaded if there is none.
+    const keys = new Set([...Object.keys(this.state.bases), ...this.dirty, ...this.debounces.keys()]);
+    for (const key of keys) {
+      if (isMarker(key) && key.startsWith(`${fk}/`)) this.localRenamed(key, to + key.slice(fk.length));
+    }
+  }
+
+  /** A folder deleted here: no marker for it or below it, and the markers it held are removed in Kumbu². */
+  localFolderDeleted(path: string): void {
+    if (this.stopped) return;
+    const key = keyOf(path);
+    for (const k of [...this.folderWaits.keys()]) if (k === key || k.startsWith(`${key}/`)) this.cancelFolderWait(k);
+    for (const k of Object.keys(this.state.bases)) if (isMarker(k) && k.startsWith(`${key}/`)) this.localDeleted(k);
   }
 
   /** `full`: start, visible again, hourly; otherwise (hint, "Sync now", poll) only what changed since the cursor. */
@@ -326,7 +388,7 @@ export class SyncEngine {
     const remote = new Map<string, Version | null>();
     // A server without attachments lists notes only. With them, a deleted path comes without a kind (the server's
     // `deleted` is a list of paths): its extension says what it was, so syncPath treats it as notes' deletions are.
-    const kinds = new Set([undefined, "note", ...(answer.attachments ? ["image", "pdf"] : [])]);
+    const kinds = new Set([undefined, "note", ...(answer.attachments ? ["image", "pdf", "folder"] : [])]);
     const entries = answer.entries
       .filter((e) => kinds.has(e.kind))
       .map((e) => ({ key: keyOf(e.path), version: e.version }))
@@ -413,7 +475,8 @@ export class SyncEngine {
     const { remote, keys } = await this.resolve(answer);
     const sides = new Map<string, { local: Version | null; remote: Version | null }>();
     for (const key of keys) {
-      if (this.state.bases[key] !== undefined) continue;
+      // A marker is never shown, nor asked about (both sides' is the same): the normal decision below syncs it.
+      if (this.state.bases[key] !== undefined || isMarker(key)) continue;
       const local = await this.localVersion(key, this.localPathOf.get(key) ?? key);
       // Stays as it is whatever the choice, so it is no part of the question: syncPath lists it.
       if (local === TOO_LARGE) {
@@ -511,7 +574,9 @@ export class SyncEngine {
   private async scanLocal(full: boolean): Promise<Map<string, string>> {
     const found = new Map<string, string>();
     if (full) this.attachments.clear();
-    for (const path of await this.o.local.list()) {
+    // Markers are dot files, so in no list: looked for only by a full check, and only where they sync.
+    const markers = full && this.supportsAttachments ? await this.o.local.listMarkers() : [];
+    for (const path of [...(await this.o.local.list()), ...markers]) {
       const kind = eligibility(path, this.supportsAttachments);
       if (kind === "attachment") this.attachments.add(path);
       if (kind !== "sync") continue;
@@ -529,6 +594,10 @@ export class SyncEngine {
     // Decided now; set again below if Kumbu² still can't hand it over.
     this.unserved.delete(key);
     if (eligibility(key, this.supportsAttachments) !== "sync" || this.caseClashes.has(key)) {
+      this.dirty.delete(key);
+      return;
+    }
+    if (isMarker(key) && this.markersRefused) {
       this.dirty.delete(key);
       return;
     }
@@ -566,6 +635,16 @@ export class SyncEngine {
           return;
         }
         if (!(e instanceof RejectedError)) throw e;
+        if (isMarker(key)) {
+          // A server from before folder markers knows no such file: final for this run, and nothing to list. Markers are
+          // then off both ways until the next start(), whose full check compares every one with its base again.
+          if (!this.markersRefused) {
+            console.warn(`Kumbu² Sync: this server keeps no empty folders (${e.message}); they stay in Obsidian only until the server is updated.`);
+          }
+          this.markersRefused = true;
+          this.dirty.delete(key);
+          return;
+        }
         this.rejected.set(key, { version: local ?? "", detail: e.message });
         this.dirty.delete(key);
         return;
@@ -585,7 +664,8 @@ export class SyncEngine {
    * copy of a photo keeps the photo's name). Once it fits again, it is decided against the base it had.
    */
   private async tooLargeToRead(key: string, path: string, stat?: FileStat | null): Promise<boolean> {
-    if (!isFile(key)) return false;
+    // A note is read whatever its size; a marker never is.
+    if (attachmentKind(key) === null) return false;
     const size = stat === undefined ? await this.o.local.size(path) : (stat?.size ?? null);
     if (size === null || size <= MAX_ATTACHMENT_BYTES) return false;
     this.tooLarge.add(key);
@@ -765,6 +845,11 @@ export class SyncEngine {
    * it had before the read (`stat`, else asked now): a change during the read gives a new stat, so it is read again.
    */
   private async readLocal(key: string, path: string, stat?: FileStat | null): Promise<{ content: Content | null; version: Version | null }> {
+    if (isMarker(key)) {
+      // Never read: a marker with bytes in it (another tool's) is still the empty marker, and is sent empty.
+      const found = (stat === undefined ? await this.o.local.stat(path) : stat) !== null;
+      return found ? { content: new ArrayBuffer(0), version: MARKER_VERSION } : { content: null, version: null };
+    }
     if (isFile(key)) {
       const before = stat === undefined ? await this.o.local.stat(path) : stat;
       const bytes = await this.o.local.readBinary(path);
@@ -780,7 +865,7 @@ export class SyncEngine {
 
   /** readLocal's version, without reading an attachment over its limit (TOO_LARGE): only a comparison needs it. */
   private async localVersion(key: string, path: string): Promise<Version | null> {
-    if (isFile(key) && ((await this.o.local.size(path)) ?? 0) > MAX_ATTACHMENT_BYTES) return TOO_LARGE;
+    if (attachmentKind(key) !== null && ((await this.o.local.size(path)) ?? 0) > MAX_ATTACHMENT_BYTES) return TOO_LARGE;
     return (await this.readLocal(key, path)).version;
   }
 
@@ -859,6 +944,12 @@ export class SyncEngine {
   private cancelRetry(): void {
     if (this.retryHandle !== null) this.o.clock.clearTimeout(this.retryHandle);
     this.retryHandle = null;
+  }
+
+  private cancelFolderWait(key: string): void {
+    const h = this.folderWaits.get(key);
+    if (h !== undefined) this.o.clock.clearTimeout(h);
+    this.folderWaits.delete(key);
   }
 
   private cancelDebounce(key: string): void {

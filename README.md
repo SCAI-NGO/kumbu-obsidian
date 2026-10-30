@@ -12,7 +12,7 @@ The design is in the server repository: [`docs/superpowers/specs/2026-10-26-obsi
 
 ## Network use
 
-The plugin talks only to the Kumbu² server you enter. It uses HTTPS (plain HTTP only for `localhost` and `127.0.0.1`), for REST calls and for one WebSocket that tells it when the vault changed. It sends the paths and text of every `.md` note outside dot folders, the paths and bytes of the PDFs and images it syncs (see below), and the device name when pairing (it becomes the key's name in Kumbu², and conflict copies carry it). Nothing else: no other files, no settings, no telemetry.
+The plugin talks only to the Kumbu² server you enter. It uses HTTPS (plain HTTP only for `localhost` and `127.0.0.1`), for REST calls and for one WebSocket that tells it when the vault changed. It sends the paths and text of every `.md` note outside dot folders, the paths and bytes of the PDFs and images it syncs (see below), the paths of the folders kept empty, and the device name when pairing (it becomes the key's name in Kumbu², and conflict copies carry it). Nothing else: no other files, no settings, no telemetry.
 
 ## Installation
 
@@ -29,9 +29,13 @@ If you already have an API key with write access to the vault, "I have an API ke
 
 **What syncs:** every `.md` note outside dot folders (`.obsidian/`, `.trash/` and any folder whose name starts with `.`), up to 1 MiB each, and PDFs and images (`.pdf`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) up to 15 MB each. Edits are uploaded 2 s after you stop typing, and changes in Kumbu² arrive within seconds while Obsidian is open. On a phone they arrive when you open the app. A changed PDF or image is sent whole. Renames and deletions sync too. A note or file deleted in Kumbu² goes to the trash you chose in Obsidian's settings.
 
+Empty folders too: a folder you make in Obsidian that is still empty 5 s later reaches Kumbu², and one made in Kumbu² arrives here. Both keep a hidden, empty `.vaultkeep` file in the folder, which Obsidian doesn't show; it stays when notes arrive, so the folder stays when they go. A folder another program (a sync tool, say) makes in the vault while Obsidian runs gets a marker too if it is still empty 5 s later, and then stays in Kumbu² until you remove it.
+
 PDFs and images need a Kumbu² server that keeps attachments. With an older server the plugin syncs notes only, as before, and lists PDFs and images as not synced; it notices a newer server by itself. Upgrading from 0.1.1 against a server that already keeps attachments: a PDF or image that differs between Obsidian and Kumbu² gets a conflict copy, as after any change on both sides. A reverse proxy in front of Kumbu² must take request bodies of at least 15 MB, or uploads are listed as "The server refused this (413)".
 
 **What doesn't sync:** other files (Office documents, SVG, HEIC, audio and so on: Kumbu² keeps notes, PDFs and images only), anything in dot folders, notes larger than 1 MiB, PDFs and images larger than 15 MB, and a file whose path differs only in case from another, on systems where that would be the same file. Kumbu² checks that a file's content matches its extension, so a renamed file it refuses is listed with the server's reason. The settings list each file that isn't synced, with the reason.
+
+Empty folders made while the plugin isn't running or the server can't be reached stay in Obsidian only until something is put into them; so do folders that existed before the first sync. A Kumbu² server older than 0.2.5 keeps no empty folders: the plugin asks it once per start and keeps them local.
 
 **Files too large:** a note over 1 MiB, or a PDF or image over 15 MB, is not synced, and Obsidian shows a notice once for each such file, naming it and what to do. When several turn up in one sync (a first sync, say), one notice gives their number and points to the settings' list. An image can be uploaded in the Kumbu² web app, which can make it smaller; the plugin doesn't change your files. While a file is too large, the plugin doesn't read it and nothing from Kumbu² replaces or trashes it, the web app's smaller copy under the same name included. The notice comes again only if the file shrank below the limit (or was deleted) and later grew too large again. Other files Kumbu² doesn't keep get no notice; they are only in the settings' list.
 

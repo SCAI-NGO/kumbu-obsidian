@@ -18,7 +18,7 @@ export interface VersionsView {
   /** True when asked with attachments=1 of a server that keeps attachments; absent from an older server. */
   attachments?: boolean;
 }
-export interface VersionEntry { path: string; version: string; kind?: "note" | "image" | "pdf"; }
+export interface VersionEntry { path: string; version: string; kind?: "note" | "image" | "pdf" | "folder"; }
 
 /** GET/PUT /api/notes/{vault}/{path}. */
 export interface NoteView {
