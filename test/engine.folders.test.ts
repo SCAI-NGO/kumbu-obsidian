@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Folder markers (.vaultkeep) through the engine: synced as empty files, and the folders they keep.
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { FOLDER_SETTLE_MS } from "../src/engine/engine";
 import type { Choice, MergePlan } from "../src/engine/firstSync";
+import { OfflineError } from "../src/engine/ports";
 import { MARKER_VERSION } from "../src/engine/version";
 import { harness, settle, type Harness } from "./fakes/harness";
 
@@ -19,6 +21,23 @@ async function synced(h: Harness, path: string): Promise<void> {
   await h.engine.stop();
   await h.engine.start();
   h.server.calls.length = 0;
+}
+
+/** The user makes an empty folder, and Obsidian reports it. */
+function userMakesFolder(h: Harness, path: string): void {
+  h.files.folders.add(path);
+  h.engine.localFolderCreated(path);
+}
+
+/** The user renames a folder holding nothing but these markers (vault-relative paths below it). */
+function userRenamesFolder(h: Harness, from: string, to: string, markers: string[] = []): void {
+  for (const m of markers) h.files.userRename(`${from}/${m}`, `${to}/${m}`);
+  for (const f of [...h.files.folders]) {
+    if (f === from || f.startsWith(`${from}/`)) {
+      h.files.folders.delete(f);
+      h.files.folders.add(to + f.slice(from.length));
+    }
+  }
 }
 
 describe("markers sync both ways", () => {
@@ -204,5 +223,196 @@ describe("a server without folder markers", () => {
     await settle(h, 2000);
     expect(h.server.count("removeFile")).toBe(1);
     warn.mockRestore();
+  });
+});
+
+describe("folders made in Obsidian", () => {
+  test("an empty folder made here gets a marker after 5 s", async () => {
+    expect(FOLDER_SETTLE_MS).toBe(5000);
+    const h = await harness();
+    userMakesFolder(h, "Drafts");
+    await settle(h, 4999);
+    expect(h.files.binaries.has("Drafts/.vaultkeep")).toBe(false);
+    await settle(h, 1 + 2000);
+    expect(h.files.binaries.get("Drafts/.vaultkeep")).toEqual(EMPTY);
+    expect(h.server.files.has("Drafts/.vaultkeep")).toBe(true);
+    expect(putFiles(h).map(byteLengthOf)).toEqual([0]);
+  });
+
+  test("a folder that holds something by then gets none", async () => {
+    const h = await harness();
+    userMakesFolder(h, "Drafts");
+    await settle(h, 3000);
+    h.files.userEdit("Drafts/a.md", "a");
+    h.engine.localChanged("Drafts/a.md");
+    await settle(h, 2000 + 2000);
+    expect(h.files.binaries.has("Drafts/.vaultkeep")).toBe(false);
+    expect(h.server.files.has("Drafts/.vaultkeep")).toBe(false);
+    expect(h.server.notes.has("Drafts/a.md")).toBe(true);
+  });
+
+  test("a folder the plugin made itself gets none", async () => {
+    const h = await harness();
+    h.files.madeHere.add("Drafts");
+    userMakesFolder(h, "Drafts");
+    await settle(h, 5000 + 2000);
+    expect(h.files.binaries.has("Drafts/.vaultkeep")).toBe(false);
+    expect(putFiles(h)).toHaveLength(0);
+    expect(h.files.madeHere.has("Drafts")).toBe(false);
+  });
+
+  test("a folder the user made before a download into it is not one the plugin made", async () => {
+    const h = await harness();
+    userMakesFolder(h, "Drafts");
+    await h.server.agentWrite("Drafts/a.md", "a");
+    await h.server.agentWrite("New/b.md", "b");
+    await h.engine.check(false);
+    expect(h.files.files.get("Drafts/a.md")).toBe("a");
+    // The download made New, but Drafts was there before it.
+    expect(h.files.madeHere.has("Drafts")).toBe(false);
+    expect(h.files.madeHere.has("New")).toBe(true);
+    // The user moves the note out again within the wait: Drafts is empty, and theirs.
+    h.files.userRename("Drafts/a.md", "a.md");
+    h.engine.localRenamed("Drafts/a.md", "a.md");
+    await settle(h, 5000);
+    await settle(h, 2000);
+    expect(h.files.binaries.get("Drafts/.vaultkeep")).toEqual(EMPTY);
+    expect(h.server.files.has("Drafts/.vaultkeep")).toBe(true);
+  });
+
+  test("no marker while offline, on a server without attachments, in a dot folder, or during the first sync", async () => {
+    const offline = await harness();
+    userMakesFolder(offline, "Drafts");
+    offline.server.failNext("versions", new OfflineError("down"));
+    await offline.engine.check(false);
+    await settle(offline, 5000 + 2000);
+    expect(offline.files.writes).toBe(0);
+    expect(offline.server.count("putFile")).toBe(0);
+
+    const old = await harness({ oldServer: true });
+    userMakesFolder(old, "Drafts");
+    await settle(old, 5000 + 2000);
+    expect(old.files.writes).toBe(0);
+    expect(old.server.count("putFile")).toBe(0);
+
+    const dot = await harness();
+    userMakesFolder(dot, "a/.hidden");
+    await settle(dot, 5000 + 2000);
+    expect(dot.files.writes).toBe(0);
+    expect(dot.server.count("putFile")).toBe(0);
+
+    const first = await harness({ start: false });
+    const release = first.server.hold("versions");
+    const done = first.engine.firstSync(() => Promise.resolve<Choice | null>("both"));
+    userMakesFolder(first, "Drafts");
+    // Not settle: the queue waits for the held versions call.
+    await vi.advanceTimersByTimeAsync(5000);
+    release();
+    await done;
+    await settle(first, 2000);
+    expect(first.files.writes).toBe(0);
+    expect(first.server.count("putFile")).toBe(0);
+  });
+
+  test("a folder renamed within the wait moves the wait to its new name", async () => {
+    const h = await harness();
+    userMakesFolder(h, "Untitled");
+    await settle(h, 3000);
+    userRenamesFolder(h, "Untitled", "Drafts");
+    h.engine.localFolderRenamed("Untitled", "Drafts");
+    await settle(h, 3000);
+    expect(h.files.binaries.size).toBe(0);
+    expect(h.server.files.size).toBe(0);
+    await settle(h, 2000 + 2000);
+    expect([...h.files.binaries.keys()]).toEqual(["Drafts/.vaultkeep"]);
+    expect([...h.server.files.keys()]).toEqual(["Drafts/.vaultkeep"]);
+  });
+
+  test("an Untitled folder named after its marker leaves one folder", async () => {
+    const h = await harness();
+    userMakesFolder(h, "Untitled");
+    await settle(h, 5000 + 2000);
+    expect([...h.server.files.keys()]).toEqual(["Untitled/.vaultkeep"]);
+    h.server.calls.length = 0;
+    userRenamesFolder(h, "Untitled", "Drafts", [".vaultkeep"]);
+    h.engine.localFolderRenamed("Untitled", "Drafts");
+    await settle(h, 5000 + 2000);
+    expect(h.server.count("move")).toBe(1);
+    expect([...h.server.files.keys()]).toEqual(["Drafts/.vaultkeep"]);
+    expect([...h.files.binaries.keys()]).toEqual(["Drafts/.vaultkeep"]);
+  });
+
+  test("a folder deleted within the wait gets no marker", async () => {
+    const h = await harness();
+    userMakesFolder(h, "Drafts");
+    await settle(h, 2000);
+    h.files.folders.delete("Drafts");
+    h.engine.localFolderDeleted("Drafts");
+    await settle(h, 7000);
+    expect(h.files.writes).toBe(0);
+    expect(putFiles(h)).toHaveLength(0);
+  });
+
+  test("stop cancels a folder's wait", async () => {
+    const h = await harness();
+    userMakesFolder(h, "Drafts");
+    await h.engine.stop();
+    await settle(h, 7000);
+    expect(h.files.writes).toBe(0);
+  });
+});
+
+describe("kept folders renamed and deleted here", () => {
+  test("renaming a kept folder moves its markers in Kumbu²", async () => {
+    const h = await harness();
+    await synced(h, "Old/.vaultkeep");
+    await synced(h, "Old/Sub/.vaultkeep");
+    userRenamesFolder(h, "Old", "New", [".vaultkeep", "Sub/.vaultkeep"]);
+    h.engine.localFolderRenamed("Old", "New");
+    await settle(h);
+    expect(h.server.calls.filter((c) => c.method === "move").map((c) => c.args)).toEqual([
+      ["Old/.vaultkeep", "New/.vaultkeep"], ["Old/Sub/.vaultkeep", "New/Sub/.vaultkeep"],
+    ]);
+    expect(putFiles(h)).toHaveLength(0);
+    expect(h.state.state.bases).toEqual({ "New/.vaultkeep": MARKER_VERSION, "New/Sub/.vaultkeep": MARKER_VERSION });
+  });
+
+  test("a rename reported for the folder and its subfolder moves each marker once", async () => {
+    const h = await harness();
+    await synced(h, "Old/.vaultkeep");
+    await synced(h, "Old/Sub/.vaultkeep");
+    userRenamesFolder(h, "Old", "New", [".vaultkeep", "Sub/.vaultkeep"]);
+    h.engine.localFolderRenamed("Old", "New");
+    h.engine.localFolderRenamed("Old/Sub", "New/Sub");
+    await settle(h, 2000);
+    expect(h.server.count("move")).toBe(2);
+    expect(h.server.count("removeFile")).toBe(0);
+    expect(putFiles(h)).toHaveLength(0);
+    expect([...h.server.files.keys()].sort()).toEqual(["New/.vaultkeep", "New/Sub/.vaultkeep"]);
+  });
+
+  test("a kept folder moved into a dot folder loses its marker in Kumbu²", async () => {
+    const h = await harness();
+    await synced(h, "Drafts/.vaultkeep");
+    userRenamesFolder(h, "Drafts", ".archive/Drafts", [".vaultkeep"]);
+    h.engine.localFolderRenamed("Drafts", ".archive/Drafts");
+    await settle(h, 2000);
+    const removes = h.server.calls.filter((c) => c.method === "removeFile");
+    expect(removes.map((c) => c.args)).toEqual([["Drafts/.vaultkeep", MARKER_VERSION]]);
+    expect(putFiles(h)).toHaveLength(0);
+    expect(h.server.count("move")).toBe(0);
+    expect(h.server.files.size).toBe(0);
+  });
+
+  test("deleting a kept folder removes its marker in Kumbu²", async () => {
+    const h = await harness();
+    await synced(h, "Drafts/.vaultkeep");
+    h.files.userDelete("Drafts/.vaultkeep");
+    h.files.folders.delete("Drafts");
+    h.engine.localFolderDeleted("Drafts");
+    await settle(h);
+    const removes = h.server.calls.filter((c) => c.method === "removeFile");
+    expect(removes.map((c) => c.args)).toEqual([["Drafts/.vaultkeep", MARKER_VERSION]]);
+    expect(h.state.state.bases["Drafts/.vaultkeep"]).toBeUndefined();
   });
 });

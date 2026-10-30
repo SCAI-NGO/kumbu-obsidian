@@ -3,7 +3,7 @@
 import { conflictCopyText } from "./conflict";
 import { decide, type Action } from "./decide";
 import { makePlan, type Choice, type FirstSyncSummary, type MergePlan } from "./firstSync";
-import { attachmentKind, conflictCopyPath, eligibility, isMarker } from "./paths";
+import { attachmentKind, conflictCopyPath, eligibility, isMarker, MARKER } from "./paths";
 import {
   AuthError, OfflineError, RejectedError,
   type Clock, type FileStat, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi,
@@ -30,6 +30,9 @@ export const MAX_ATTACHMENT_BYTES = 15_728_640;
 export function limitOf(path: string): number {
   return attachmentKind(path) === null ? MAX_BYTES : MAX_ATTACHMENT_BYTES;
 }
+
+/** How long a folder made here waits before it is looked at: Obsidian's "New folder" names it a moment later. */
+export const FOLDER_SETTLE_MS = 5000;
 
 const DEBOUNCE_MS = 2000;
 const FULL_AFTER_MS = 25 * 24 * 3600_000;
@@ -71,6 +74,8 @@ export class SyncEngine {
   private state: SyncState = { bases: {}, cursor: null, lastFullAt: null, lastSyncAt: null };
   private stopped = true;
   private readonly debounces = new Map<string, unknown>();
+  /** Folders made here waiting out FOLDER_SETTLE_MS, by key. */
+  private readonly folderWaits = new Map<string, unknown>();
   /** Paths with local work not yet done, retried by every check until it succeeds. */
   private readonly dirty = new Set<string>();
   /** Key → the path as the file system spells it (NFD on some, or another case). */
@@ -120,6 +125,8 @@ export class SyncEngine {
     this.stopped = true;
     for (const h of this.debounces.values()) this.o.clock.clearTimeout(h);
     this.debounces.clear();
+    for (const h of this.folderWaits.values()) this.o.clock.clearTimeout(h);
+    this.folderWaits.clear();
     this.cancelRetry();
     await this.queue.idle();
   }
@@ -242,6 +249,51 @@ export class SyncEngine {
       await this.syncPath(fk, this.state.bases[fk] ?? null, false);
       await this.syncPath(tk, this.state.bases[tk] ?? null, false);
     });
+  }
+
+  /**
+   * A folder made here: once it has waited FOLDER_SETTLE_MS and is still empty, and this plugin didn't make it, it
+   * gets a marker. Only while running and online: the full check can't tell an empty folder from one older than the
+   * plugin, so a folder made at any other time keeps no marker.
+   */
+  localFolderCreated(path: string): void {
+    if (this.stopped) return;
+    const key = keyOf(path);
+    this.cancelFolderWait(key);
+    this.folderWaits.set(key, this.o.clock.setTimeout(() => {
+      this.folderWaits.delete(key);
+      // Made during the first sync: as one made before it, not kept.
+      if (this.firstSyncChoose !== null) return;
+      void this.run(async () => {
+        const marker = `${path}/${MARKER}`;
+        const keep = !this.stopped && !this.offline && this.firstSyncChoose === null && this.supportsAttachments
+          && !this.markersRefused && eligibility(marker, true) === "sync"
+          && !this.o.local.madeFolder(path) && (await this.o.local.isEmptyFolder(path));
+        if (keep && (await this.o.local.writeBinaryIf(marker, null, new ArrayBuffer(0)))) this.localChanged(marker);
+        return false;
+      });
+    }, FOLDER_SETTLE_MS));
+  }
+
+  /** A folder renamed here: its wait starts afresh under the new name, and every marker below it moves. */
+  localFolderRenamed(from: string, to: string): void {
+    if (this.stopped) return;
+    const fk = keyOf(from);
+    if (this.folderWaits.has(fk)) {
+      this.cancelFolderWait(fk);
+      this.localFolderCreated(to);
+    }
+    for (const key of Object.keys(this.state.bases)) {
+      if (isMarker(key) && key.startsWith(`${fk}/`)) this.localRenamed(key, to + key.slice(fk.length));
+    }
+  }
+
+  /** A folder deleted here: no marker for it or below it, and the markers it held are removed in Kumbu². */
+  localFolderDeleted(path: string): void {
+    if (this.stopped) return;
+    const key = keyOf(path);
+    for (const k of [...this.folderWaits.keys()]) if (k === key || k.startsWith(`${key}/`)) this.cancelFolderWait(k);
+    for (const k of Object.keys(this.state.bases)) if (isMarker(k) && k.startsWith(`${key}/`)) this.localDeleted(k);
   }
 
   /** `full`: start, visible again, hourly; otherwise (hint, "Sync now", poll) only what changed since the cursor. */
@@ -888,6 +940,12 @@ export class SyncEngine {
   private cancelRetry(): void {
     if (this.retryHandle !== null) this.o.clock.clearTimeout(this.retryHandle);
     this.retryHandle = null;
+  }
+
+  private cancelFolderWait(key: string): void {
+    const h = this.folderWaits.get(key);
+    if (h !== undefined) this.o.clock.clearTimeout(h);
+    this.folderWaits.delete(key);
   }
 
   private cancelDebounce(key: string): void {
