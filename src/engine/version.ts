@@ -4,6 +4,9 @@ import type { Version } from "./ports";
 
 export const MAX_BYTES = 1_048_576;
 
+/** A folder marker's token: of zero bytes (VersionToken.Of([])), the same on every device. */
+export const MARKER_VERSION: Version = "e3b0c44298fc";
+
 const encoder = new TextEncoder();
 
 export function normaliseText(text: string): string {

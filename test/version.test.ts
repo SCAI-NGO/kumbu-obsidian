@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, test } from "vitest";
-import { byteSize, MAX_BYTES, normaliseText, versionOf, versionOfBytes } from "../src/engine/version";
+import { byteSize, MARKER_VERSION, MAX_BYTES, normaliseText, versionOf, versionOfBytes } from "../src/engine/version";
 
 test("version matches the server's token", async () => {
   // printf '# Plan\n' | sha256sum → c3964bb3b70a…
@@ -24,4 +24,8 @@ test("versionOfBytes does not normalise CRLF", async () => {
   expect(await versionOfBytes(bytes)).not.toBe(await versionOf("# Plan\r\n"));
   expect(await versionOfBytes(bytes.slice().buffer)).toBe(await versionOfBytes(bytes));
   expect(await versionOfBytes(new TextEncoder().encode("# Plan\n"))).toBe("c3964bb3b70a");
+});
+test("the marker's version is the token of zero bytes", async () => {
+  expect(await versionOfBytes(new Uint8Array(0))).toBe(MARKER_VERSION);
+  expect(MARKER_VERSION).toBe("e3b0c44298fc");
 });

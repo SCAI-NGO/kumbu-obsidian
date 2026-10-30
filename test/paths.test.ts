@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, test } from "vitest";
 import {
-  conflictCopyPath, defaultDeviceName, eligibility, fromApiPath, isAllowedServerUrl, isValidDeviceName,
+  conflictCopyPath, defaultDeviceName, eligibility, fromApiPath, isAllowedServerUrl, isMarker, isValidDeviceName,
   secretId, serverProblem, slug, toApiPath, urlFor,
 } from "../src/engine/paths";
 
@@ -81,4 +81,15 @@ test("device names", () => {
   expect(isValidDeviceName("")).toBe(false);
   expect(isValidDeviceName("   ")).toBe(false);
   expect(isValidDeviceName("x".repeat(33))).toBe(false);
+});
+test("a folder marker syncs only on a server with attachments, and only outside dot folders", () => {
+  expect(eligibility("Drafts/.vaultkeep", true)).toBe("sync");
+  expect(eligibility("Work/Drafts/2026/.vaultkeep", true)).toBe("sync");
+  expect(eligibility("Drafts/.vaultkeep", false)).toBe("ignored");
+  for (const p of [".vaultkeep", "a/.hidden/.vaultkeep", ".obsidian/.vaultkeep", "Drafts/.VaultKeep", "Drafts/.vaultkeep.md", "Drafts/.DS_Store"]) {
+    expect(eligibility(p, true)).toBe("ignored");
+  }
+  expect(isMarker("Drafts/.vaultkeep")).toBe(true);
+  expect(isMarker(".vaultkeep")).toBe(false);
+  expect(isMarker("Drafts/x.vaultkeep")).toBe(false);
 });
