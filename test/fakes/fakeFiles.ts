@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // In-memory LocalFiles. `caseInsensitive` makes lookups ignore case, as on macOS, Windows and Android.
-import { isMarker } from "../../src/engine/paths";
+import { eligibility, isMarker } from "../../src/engine/paths";
 import type { FileStat, LocalFiles, Version } from "../../src/engine/ports";
 import { versionOf, versionOfBytes, versionOfSync } from "../../src/engine/version";
 
@@ -63,8 +63,9 @@ export class FakeFiles implements LocalFiles {
     return Promise.resolve(this.paths().filter((p) => !p.split("/").some((s) => s.startsWith("."))));
   }
 
+  /** As VaultFiles and NodeFiles: none in a dot folder. */
   listMarkers(): Promise<string[]> {
-    return Promise.resolve(this.paths().filter(isMarker));
+    return Promise.resolve(this.paths().filter((p) => isMarker(p) && eligibility(p, true) === "sync"));
   }
 
   read(path: string): Promise<string | null> {

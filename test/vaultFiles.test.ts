@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { App } from "obsidian";
 import { MarkdownView, TFile, TFolder } from "./fakes/obsidian";
+import { fakeClock, MemoryState } from "./fakes/harness";
+import { FakeServer } from "./fakes/fakeServer";
+import { FOLDER_SETTLE_MS, SyncEngine } from "../src/engine/engine";
 import { VaultFiles } from "../src/obsidian/vaultFiles";
-import { versionOfBytes, versionOfSync } from "../src/engine/version";
+import { MARKER_VERSION, versionOfBytes, versionOfSync } from "../src/engine/version";
 
 /** A vault of files on disk and editors open on some of them, shaped like the parts of App the adapter uses. */
 function fakeApp(disk: Record<string, string>) {
@@ -288,5 +291,137 @@ describe("removeFolderIfEmpty", () => {
     const f = folderApp([], []);
     expect(await new VaultFiles(f.app).removeFolderIfEmpty("gone")).toBe(false);
     expect(f.deleted).toEqual([]);
+  });
+});
+
+describe("folder markers", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  /**
+   * Folders in Obsidian's index, and dot files that are only on disk: the index has no dot files, so a marker is seen
+   * through the adapter alone. `getFileByPath` and the trash know nothing of them, as in Obsidian.
+   */
+  function markerApp(folderPaths: string[], dotFiles: Record<string, Uint8Array> = {}) {
+    const folders = new Set(folderPaths);
+    const disk = new Map(Object.entries(dotFiles));
+    const created: string[] = [];
+    const trashed: string[] = [];
+    let exists = 0;
+    const folder = (p: string) => (folders.has(p) ? new TFolder(p) : null);
+    const app = {
+      vault: {
+        getFiles: () => [],
+        getFileByPath: () => null,
+        getFolderByPath: folder,
+        getAbstractFileByPath: folder,
+        getAllFolders: (includeRoot?: boolean) => [...(includeRoot ? ["/"] : []), ...folders].map((p) => new TFolder(p)),
+        createFolder: (p: string) => { created.push(p); folders.add(p); return Promise.resolve(); },
+        adapter: {
+          exists: (p: string) => { exists++; return Promise.resolve(disk.has(p) || folders.has(p)); },
+          stat: (p: string) => Promise.resolve(
+            disk.has(p) ? { type: "file", size: disk.get(p)!.byteLength, mtime: 1_700_000_000_000, ctime: 0 }
+              : folders.has(p) ? { type: "folder", size: 0, mtime: 0, ctime: 0 } : null),
+          readBinary: (p: string) => (disk.has(p) ? Promise.resolve(disk.get(p)!.slice().buffer) : Promise.reject(new Error("ENOENT"))),
+          writeBinary: (p: string, data: ArrayBuffer) => { disk.set(p, new Uint8Array(data)); return Promise.resolve(); },
+          remove: (p: string) => { disk.delete(p); return Promise.resolve(); },
+          list: (p: string) => Promise.resolve({
+            files: [...disk.keys()].filter((f) => f.startsWith(`${p}/`) && !f.slice(p.length + 1).includes("/")),
+            folders: [...folders].filter((f) => f.startsWith(`${p}/`) && !f.slice(p.length + 1).includes("/")),
+          }),
+        },
+      },
+      workspace: { getLeavesOfType: () => [] },
+      fileManager: { trashFile: (f: TFile) => { trashed.push(f.path); return Promise.resolve(); } },
+    };
+    return { app: app as unknown as App, folders, disk, created, trashed, existsCalls: () => exists };
+  }
+
+  test("listMarkers asks the disk once per folder outside dot folders", async () => {
+    const empty = new Uint8Array(0);
+    const f = markerApp(["a", "a/b", "c", ".obsidian", "c/.git"], { "a/.vaultkeep": empty, "a/b/.vaultkeep": empty, ".obsidian/.vaultkeep": empty });
+    expect((await new VaultFiles(f.app).listMarkers()).sort()).toEqual(["a/.vaultkeep", "a/b/.vaultkeep"]);
+    expect(f.existsCalls()).toBe(3);
+  });
+
+  test("a marker is written, read, stat'ed and removed through the adapter", async () => {
+    const f = markerApp(["a"]);
+    const files = new VaultFiles(f.app);
+    expect(await files.writeBinaryIf("a/.vaultkeep", null, new ArrayBuffer(0))).toBe(true);
+    expect(f.disk.has("a/.vaultkeep")).toBe(true);
+    expect(await files.writeBinaryIf("a/.vaultkeep", null, new ArrayBuffer(0))).toBe(false);
+    // Any other expected version: nothing written, the answer is whether it exists.
+    expect(await files.writeBinaryIf("a/.vaultkeep", MARKER_VERSION, new ArrayBuffer(0))).toBe(true);
+    expect(await files.stat("a/.vaultkeep")).toEqual({ size: 0, mtime: 1_700_000_000_000 });
+    expect(await files.size("a/.vaultkeep")).toBe(0);
+    expect((await files.readBinary("a/.vaultkeep"))!.byteLength).toBe(0);
+    expect(await files.trashBinaryIf("a/.vaultkeep", MARKER_VERSION)).toBe(true);
+    expect(f.disk.has("a/.vaultkeep")).toBe(false);
+    expect(f.trashed).toEqual([]);
+    expect(await files.trashBinaryIf("a/.vaultkeep", MARKER_VERSION)).toBe(false);
+    expect(await files.stat("a/.vaultkeep")).toBeNull();
+    expect(await files.size("a/.vaultkeep")).toBeNull();
+    expect(await files.readBinary("a/.vaultkeep")).toBeNull();
+    expect(await files.writeBinaryIf("a/.vaultkeep", MARKER_VERSION, new ArrayBuffer(0))).toBe(false);
+  });
+
+  test("a folder of the marker's name is no marker", async () => {
+    const f = markerApp(["a", "a/.vaultkeep"]);
+    expect(await new VaultFiles(f.app).stat("a/.vaultkeep")).toBeNull();
+  });
+
+  test("writing a marker makes its folders and remembers them as its own", async () => {
+    const f = markerApp([]);
+    const files = new VaultFiles(f.app);
+    expect(await files.writeBinaryIf("a/b/.vaultkeep", null, new ArrayBuffer(0))).toBe(true);
+    expect(f.created).toEqual(["a", "a/b"]);
+    expect(files.madeFolder("a/b")).toBe(true);
+    expect(files.madeFolder("a/b")).toBe(false);
+    expect(files.madeFolder("x")).toBe(false);
+  });
+
+  test("a folder made here and never asked about is forgotten once its wait is long over", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const f = markerApp([]);
+    const files = new VaultFiles(f.app);
+    await files.writeBinaryIf("a/.vaultkeep", null, new ArrayBuffer(0));
+    await files.writeBinaryIf("b/.vaultkeep", null, new ArrayBuffer(0));
+    // The engine skipped the wait for "a" (offline, say); later the user makes a folder "a" of their own.
+    vi.setSystemTime(Date.now() + FOLDER_SETTLE_MS * 2);
+    expect(files.madeFolder("b")).toBe(true);
+    vi.setSystemTime(Date.now() + 60_000);
+    expect(files.madeFolder("a")).toBe(false);
+  });
+
+  test("isEmptyFolder sees dot files", async () => {
+    const f = markerApp(["a"], { "a/.DS_Store": new Uint8Array(1) });
+    const files = new VaultFiles(f.app);
+    expect(await files.isEmptyFolder("a")).toBe(false);
+    f.disk.clear();
+    expect(await files.isEmptyFolder("a")).toBe(true);
+    expect(await files.isEmptyFolder("gone")).toBe(false);
+  });
+
+  test("a marker downloaded from Kumbu² is still there for the next full check, and stays in Kumbu²", async () => {
+    vi.useFakeTimers({ now: new Date(2026, 9, 30, 10, 15), toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const f = markerApp([]);
+    const server = new FakeServer(() => Date.now());
+    server.attachmentsSupported = true;
+    await server.seedFile("Drafts/.vaultkeep", new Uint8Array(0));
+    const state = new MemoryState();
+    const engine = new SyncEngine({
+      vault: "Work", device: "Laptop", local: new VaultFiles(f.app), remote: server, state, clock: fakeClock,
+      onStatus: () => {}, onConflict: () => {}, onAuthLost: () => {},
+    });
+    await engine.start();
+    expect(f.disk.has("Drafts/.vaultkeep")).toBe(true);
+    expect(state.state.bases["Drafts/.vaultkeep"]).toBe(MARKER_VERSION);
+    server.calls.length = 0;
+    // A restart runs a full check over what is on disk.
+    await engine.stop();
+    await engine.start();
+    expect(server.calls.filter((c) => c.method === "removeFile")).toEqual([]);
+    expect(f.disk.has("Drafts/.vaultkeep")).toBe(true);
+    expect(state.state.bases["Drafts/.vaultkeep"]).toBe(MARKER_VERSION);
+    await engine.stop();
   });
 });

@@ -7,7 +7,7 @@ export class Notice { constructor(readonly message: string) {} }
 export const Platform = { isMacOS: false, isWin: false, isLinux: true, isMobileApp: false, isAndroidApp: false, isIosApp: false, isDesktopApp: true };
 export class TAbstractFile { constructor(public path: string) {} }
 export class TFile extends TAbstractFile { stat = { size: 0, mtime: 0 }; }
-export class TFolder extends TAbstractFile {}
+export class TFolder extends TAbstractFile { children: TAbstractFile[] = []; }
 
 /** The parts of Obsidian's Editor the adapter uses, over a view's buffer. */
 export class FakeEditor {
