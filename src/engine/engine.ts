@@ -283,7 +283,10 @@ export class SyncEngine {
       this.cancelFolderWait(fk);
       this.localFolderCreated(to);
     }
-    for (const key of Object.keys(this.state.bases)) {
+    // Also a new marker still waiting for its debounce or uploading ("New folder" renamed after the wait): its rename
+    // is queued behind the upload, so it moves once its base is there, or the new name is uploaded if there is none.
+    const keys = new Set([...Object.keys(this.state.bases), ...this.dirty, ...this.debounces.keys()]);
+    for (const key of keys) {
       if (isMarker(key) && key.startsWith(`${fk}/`)) this.localRenamed(key, to + key.slice(fk.length));
     }
   }
@@ -633,7 +636,8 @@ export class SyncEngine {
         }
         if (!(e instanceof RejectedError)) throw e;
         if (isMarker(key)) {
-          // A server from before folder markers knows no such file: final for this run, and nothing to list.
+          // A server from before folder markers knows no such file: final for this run, and nothing to list. Markers are
+          // then off both ways until the next start(), whose full check compares every one with its base again.
           if (!this.markersRefused) {
             console.warn(`Kumbu² Sync: this server keeps no empty folders (${e.message}); they stay in Obsidian only until the server is updated.`);
           }

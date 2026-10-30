@@ -5,7 +5,7 @@ import { FOLDER_SETTLE_MS } from "../src/engine/engine";
 import type { Choice, MergePlan } from "../src/engine/firstSync";
 import { OfflineError } from "../src/engine/ports";
 import { MARKER_VERSION } from "../src/engine/version";
-import { harness, settle, type Harness } from "./fakes/harness";
+import { harness, settle, waitFor, type Harness } from "./fakes/harness";
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -340,6 +340,36 @@ describe("folders made in Obsidian", () => {
     expect(h.server.count("move")).toBe(1);
     expect([...h.server.files.keys()]).toEqual(["Drafts/.vaultkeep"]);
     expect([...h.files.binaries.keys()]).toEqual(["Drafts/.vaultkeep"]);
+  });
+
+  test("an Untitled folder renamed before its new marker was uploaded leaves one folder", async () => {
+    const h = await harness();
+    userMakesFolder(h, "Untitled");
+    await settle(h, 5000);
+    expect([...h.files.binaries.keys()]).toEqual(["Untitled/.vaultkeep"]);
+    expect(h.server.files.size).toBe(0);
+    userRenamesFolder(h, "Untitled", "Drafts", [".vaultkeep"]);
+    h.engine.localFolderRenamed("Untitled", "Drafts");
+    await settle(h, 2000 + 2000);
+    expect([...h.server.files.keys()]).toEqual(["Drafts/.vaultkeep"]);
+    expect([...h.files.binaries.keys()]).toEqual(["Drafts/.vaultkeep"]);
+    expect(h.state.state.bases).toEqual({ "Drafts/.vaultkeep": MARKER_VERSION });
+  });
+
+  test("an Untitled folder renamed while its new marker is uploading leaves one folder", async () => {
+    const h = await harness();
+    userMakesFolder(h, "Untitled");
+    await settle(h, 5000);
+    const release = h.server.hold("putFile");
+    await vi.advanceTimersByTimeAsync(2000);
+    await waitFor(() => h.server.count("putFile") > 0);
+    userRenamesFolder(h, "Untitled", "Drafts", [".vaultkeep"]);
+    h.engine.localFolderRenamed("Untitled", "Drafts");
+    release();
+    await settle(h, 2000 + 2000);
+    expect([...h.server.files.keys()]).toEqual(["Drafts/.vaultkeep"]);
+    expect([...h.files.binaries.keys()]).toEqual(["Drafts/.vaultkeep"]);
+    expect(h.state.state.bases).toEqual({ "Drafts/.vaultkeep": MARKER_VERSION });
   });
 
   test("a folder deleted within the wait gets no marker", async () => {

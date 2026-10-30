@@ -401,6 +401,14 @@ describe("folder markers", () => {
     expect(await files.isEmptyFolder("gone")).toBe(false);
   });
 
+  test("isEmptyFolder sees the folder's children in the index", async () => {
+    const f = markerApp(["a"]);
+    const a = new TFolder("a");
+    a.children.push(new TFile("a/b.md"));
+    (f.app.vault as unknown as { getFolderByPath: (p: string) => TFolder | null }).getFolderByPath = (p) => (p === "a" ? a : null);
+    expect(await new VaultFiles(f.app).isEmptyFolder("a")).toBe(false);
+  });
+
   test("a marker downloaded from Kumbu² is still there for the next full check, and stays in Kumbu²", async () => {
     vi.useFakeTimers({ now: new Date(2026, 9, 30, 10, 15), toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     const f = markerApp([]);
