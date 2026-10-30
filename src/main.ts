@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The plugin: settings and state in data.json, the engine and the hints wired to the vault's events.
-import { Notice, Platform, Plugin, TAbstractFile, TFile, type App } from "obsidian";
+import { Notice, Platform, Plugin, TAbstractFile, TFile, TFolder, type App } from "obsidian";
 import { KumbuApi, redeemPairing, trimServer } from "./api/client";
 import { SyncEngine } from "./engine/engine";
 import { attachmentKind, defaultDeviceName, secretId, serverProblem } from "./engine/paths";
@@ -59,10 +59,10 @@ export default class KumbuSyncPlugin extends Plugin {
     this.addSettingTab(this.tab);
     this.statusBar = new StatusBar(this.addStatusBarItem(), () => this.openSettings());
     this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.syncNow() });
-    this.registerEvent(this.app.vault.on("create", (f) => this.ifFile(f, (p) => this.engine?.localChanged(p))));
+    this.registerEvent(this.app.vault.on("create", (f) => this.ifFile(f, (p) => this.engine?.localChanged(p), (p) => this.engine?.localFolderCreated(p))));
     this.registerEvent(this.app.vault.on("modify", (f) => this.ifFile(f, (p) => this.engine?.localChanged(p))));
-    this.registerEvent(this.app.vault.on("delete", (f) => this.ifFile(f, (p) => this.engine?.localDeleted(p))));
-    this.registerEvent(this.app.vault.on("rename", (f, old) => this.ifFile(f, (p) => this.engine?.localRenamed(old, p))));
+    this.registerEvent(this.app.vault.on("delete", (f) => this.ifFile(f, (p) => this.engine?.localDeleted(p), (p) => this.engine?.localFolderDeleted(p))));
+    this.registerEvent(this.app.vault.on("rename", (f, old) => this.ifFile(f, (p) => this.engine?.localRenamed(old, p), (p) => this.engine?.localFolderRenamed(old, p))));
     this.registerDomEvent(activeDocument, "visibilitychange", () => {
       if (activeDocument.visibilityState === "visible") void this.engine?.check(true);
     });
@@ -311,8 +311,9 @@ export default class KumbuSyncPlugin extends Plugin {
     void this.forgetConnection({ revoke: false });
   }
 
-  private ifFile(file: TAbstractFile, then: (path: string) => void): void {
+  private ifFile(file: TAbstractFile, then: (path: string) => void, thenFolder?: (path: string) => void): void {
     if (file instanceof TFile) then(file.path);
+    else if (file instanceof TFolder) thenFolder?.(file.path);
   }
 }
 
