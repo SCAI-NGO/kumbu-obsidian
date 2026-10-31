@@ -606,7 +606,7 @@ Texts copied from the approved mockup (sentence case kept):
 - [ ] **Step 2: Run, verify failure.**
 - [ ] **Step 3: Implement the text functions, then the tab, modals and status bar.**
 - [ ] **Step 4: Run `pnpm lint && pnpm test && pnpm build`.**
-- [ ] **Step 5: Manual check against a local compose stack with the server plan's pairing in place:** pair a vault that already has notes with a Kumbu² vault with some equal, some different and some new notes; the choice dialog shows the right counts; each of the three choices once (fresh vaults); the result screen; the fallback with a hand-made key; disconnect; an expired key (revoke it in the web app) → the notice. Screenshot each screen into `obisdian/` notes for the test log.
+- [ ] **Step 5: Manual check against a local compose stack with the server plan's pairing in place:** pair a vault that already has notes with a Kumbu² vault with some equal, some different and some new notes; the choice dialog shows the right counts; each of the three choices once (fresh vaults); the result screen; the fallback with a hand-made key; disconnect; an expired key (revoke it in the web app) → the notice. Screenshot each screen into `obsidian/` notes for the test log.
 - [ ] **Step 6: Commit:** `git add -A && git commit -m "Add pairing, the merge dialogs and the status bar"`
 
 ---
@@ -635,7 +635,7 @@ The run: a temp folder with 30 seeded notes and the vault with 30 overlapping no
 
 **Files:**
 - Create: `.github/workflows/release.yml`
-- Modify: `README.md`, `obisdian/` (a test log note `test-0.1.0.md`)
+- Modify: `README.md`, `obsidian/` (a test log note `test-0.1.0.md`)
 
 **Interfaces:**
 - Consumes: everything.
@@ -645,8 +645,8 @@ The run: a temp folder with 30 seeded notes and the vault with 30 overlapping no
 - [ ] **Step 2: README:** description; **Prerequisites**: Obsidian 1.11.4 or newer, a Kumbu² server and account, a vault there with write access; **Network use**: the plugin talks only to the Kumbu² server you enter, over HTTPS (REST and a WebSocket), and sends the text of every `.md` note outside dot folders; **Installation** with BRAT (add `SCAI-NGO/kumbu-obsidian`), then "Connect Obsidian" in the web app and the pairing code; **Usage**: what syncs and what not (attachments, dot folders, 1 MiB), conflict copies and how to resolve them, the status bar, disconnecting; **Where the key is kept**: `SecretStorage`, with what was verified per platform (check before writing; if unverified, say only that it is Obsidian's local secret storage, not `data.json`); **Development**: `pnpm install`, `pnpm dev` with a symlink into a test vault's `.obsidian/plugins/kumbu-sync`, `pnpm test`, `pnpm lint`, `pnpm e2e` (see `e2e/README.md`), releasing (bump `manifest.json`, `versions.json`, `package.json`; tag `x.y.z` without `v`); **Licence**.
 - [ ] **Step 3: Verify:** `pnpm lint && pnpm test && pnpm build`; all pass.
 - [ ] **Step 4: Commit and tag** once the server plan's changes are deployed on kumbu.tidesson.net: `git commit -am "Document the plugin and release it from tags"`, `git tag 0.1.0`, `git push --follow-tags`. Expected: the release workflow passes and the release lists the three assets.
-- [ ] **Step 5: Install with BRAT on the laptop and the Android phone** against kumbu.tidesson.net, pair both, and walk the demo (spec §1): edit in Obsidian → Claude reads it; Claude edits → the laptop updates within seconds, the phone on opening. Write the results into `obisdian/test-0.1.0.md`.
-- [ ] **Step 6: Commit the test log:** `git add obisdian && git commit -m "Log the 0.1.0 test run" && git push`.
+- [ ] **Step 5: Install with BRAT on the laptop and the Android phone** against kumbu.tidesson.net, pair both, and walk the demo (spec §1): edit in Obsidian → Claude reads it; Claude edits → the laptop updates within seconds, the phone on opening. Write the results into `obsidian/test-0.1.0.md`.
+- [ ] **Step 6: Commit the test log:** `git add obsidian && git commit -m "Log the 0.1.0 test run" && git push`.
 
 ---
 
