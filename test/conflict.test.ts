@@ -24,6 +24,16 @@ test("in a shared vault the callout says this device", () => {
   expect(text).not.toContain("Laptop");
   expect(text.endsWith("# Plan\n")).toBe(true);
 });
+test("in a shared vault the callout names no writer either", () => {
+  expect(conflictCopyText("# Plan\n", { ...o, device: null })).toBe([
+    "> [!warning] Kumbu² conflict",
+    "> Change from **this device** at 2026-10-27 10:15.",
+    "> The other change, at 10:14, is in [[projects/Plan|Plan]].",
+    "> Merge what you need, then delete this copy.",
+    "",
+    "",
+  ].join("\n") + "# Plan\n");
+});
 test("the callout goes after frontmatter, which stays byte-identical", () => {
   const fm = "---\ntags: [a]\ntitle: x\n---\n";
   expect(conflictCopyText(fm + "body\n", o)).toBe(fm + callout + "body\n");

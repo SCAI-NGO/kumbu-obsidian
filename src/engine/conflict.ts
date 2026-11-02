@@ -20,7 +20,10 @@ export function conflictCopyText(
   const callout = [
     "> [!warning] Kumbu² conflict",
     `> Change from **${o.device ?? "this device"}** at ${day(o.localAt)} ${time(o.localAt)}.`,
-    `> The change from **${writerIdentity(o.remoteWriter)}** at ${time(o.remoteAt)} is in [[${target}|${title}]].`,
+    // The server shows a person's own other device by its name, and this copy reaches every member.
+    o.device === null
+      ? `> The other change, at ${time(o.remoteAt)}, is in [[${target}|${title}]].`
+      : `> The change from **${writerIdentity(o.remoteWriter)}** at ${time(o.remoteAt)} is in [[${target}|${title}]].`,
     "> Merge what you need, then delete this copy.",
     "",
     "",

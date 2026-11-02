@@ -497,3 +497,29 @@ describe("conflict copies in a shared vault", () => {
     expect(h.engine.status().conflicts).toEqual(["projects/Plan (conflict 2026-10-27 10-15) 2.md", COPY]);
   });
 });
+
+describe("a change from my other device", () => {
+  const conflictWithPhone = async (listing: boolean) => {
+    const h = await harness({ synced: { "plan.md": "one" } });
+    h.server.listing = listing;
+    await h.server.seed("plan.md", "from the phone", "Work – Obsidian Phone");
+    h.files.userEdit("plan.md", "mine");
+    h.engine.localChanged("plan.md");
+    await settle(h, 2000);
+    return h;
+  };
+
+  test("a change from my other device names neither device in a shared vault", async () => {
+    const h = await conflictWithPhone(true);
+    const text = h.files.files.get("plan (conflict 2026-10-27 10-15).md")!;
+    expect(text).toContain("mine");
+    expect(text).not.toContain("Phone");
+    expect(text).not.toContain("Laptop");
+    expect(text).toContain("> The other change, at 10:15, is in [[plan|plan]].");
+  });
+
+  test("in an own vault that isn't shared it names them as ever", async () => {
+    const h = await conflictWithPhone(false);
+    expect(h.files.files.get("plan (conflict Laptop 2026-10-27 10-15).md")).toContain("> The change from **Work – Obsidian Phone** at 10:15");
+  });
+});
