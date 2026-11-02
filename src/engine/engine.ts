@@ -635,9 +635,10 @@ export class SyncEngine {
           return;
         }
         if (!(e instanceof RejectedError)) throw e;
-        if (isMarker(key)) {
+        if (isMarker(key) && e.status !== 403) {
           // A server from before folder markers knows no such file: final for this run, and nothing to list. Markers are
-          // then off both ways until the next start(), whose full check compares every one with its base again.
+          // then off both ways until the next start(), whose full check compares every one with its base again. A refusal
+          // (403) says nothing about what the server keeps: that marker is only not sent again, below.
           if (!this.markersRefused) {
             console.warn(`Kumbu² Sync: this server keeps no empty folders (${e.message}); they stay in Obsidian only until the server is updated.`);
           }

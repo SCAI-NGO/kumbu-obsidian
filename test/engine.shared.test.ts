@@ -2,7 +2,7 @@
 // Shared vaults through the engine: what a refusal does, and conflict copies that name no device.
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { KumbuApi, type HttpFn } from "../src/api/client";
-import { SyncEngine } from "../src/engine/engine";
+import { FOLDER_SETTLE_MS, SyncEngine } from "../src/engine/engine";
 import { FakeFiles } from "./fakes/fakeFiles";
 import { fakeClock, harness, MemoryState, settle } from "./fakes/harness";
 
@@ -161,5 +161,40 @@ describe("over the real client", () => {
   test("a 403 without a code stops the sync as a lost key", async () => {
     const { authLost } = await sync({ status: 403, body: { error: "No." } });
     expect(authLost()).toBe(1);
+  });
+});
+
+describe("a refused folder marker", () => {
+  const EMPTY = new Uint8Array(0);
+
+  test("a refused marker doesn't switch markers off", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({ start: false });
+    h.files.binaries.set("A/.vaultkeep", EMPTY);
+    h.files.binaries.set("B/.vaultkeep", EMPTY);
+    h.server.refuse = () => READ_ONLY;
+    await h.engine.start();
+    expect(h.server.count("putFile")).toBe(2);
+    expect(h.engine.status().notSynced).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    expect(h.authLost).toBe(0);
+    await h.server.seedFile("C/.vaultkeep", EMPTY);
+    await h.engine.check(false);
+    expect(h.files.binaries.has("C/.vaultkeep")).toBe(true);
+    await h.engine.check(true);
+    expect(h.server.count("putFile")).toBe(2);
+    warn.mockRestore();
+  });
+
+  test("a folder made in a read-only vault stays here, unlisted", async () => {
+    const h = await harness();
+    h.server.refuse = () => READ_ONLY;
+    h.files.folders.add("Drafts");
+    h.engine.localFolderCreated("Drafts");
+    await settle(h, FOLDER_SETTLE_MS + 2000);
+    expect(h.files.binaries.has("Drafts/.vaultkeep")).toBe(true);
+    expect(h.server.files.has("Drafts/.vaultkeep")).toBe(false);
+    expect(h.engine.status().notSynced).toEqual([]);
+    expect(h.authLost).toBe(0);
   });
 });
