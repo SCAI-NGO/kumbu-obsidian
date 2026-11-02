@@ -147,14 +147,20 @@ export class SyncEngine {
     return this.shared ? null : this.o.device;
   }
 
-  /** Anything but a plain "not shared" counts as shared: the list failed, the vault isn't in it, the field is absent. */
-  private async readShared(): Promise<void> {
+  /**
+   * Anything but a plain "not shared" counts as shared: the list failed, the vault isn't in it, the field is absent.
+   * Returns what it settled on, so a copy goes by its own answer rather than whichever answer came last.
+   */
+  private async readShared(): Promise<boolean> {
+    let shared: boolean;
     try {
       const listed = (await this.o.remote.vaults()).find((v) => v.name === this.o.vault);
-      this.shared = listed?.shared !== false;
+      shared = listed?.shared !== false;
     } catch {
-      this.shared = true;
+      shared = true;
     }
+    this.shared = shared;
+    return shared;
   }
 
   /** The hint connection's mode; the engine shows "offline" over it while the server can't be reached. */
@@ -784,8 +790,7 @@ export class SyncEngine {
     if (note === null) return { remote: null };
     if (note.version !== remote) return { remote: note.version };
     // A copy from a local edit's 409 comes with no check before it.
-    await this.readShared();
-    const device = this.copyDevice;
+    const device = (await this.readShared()) ? null : this.o.device;
     const at = new Date(this.o.clock.now());
     const textOf = (local: string) => conflictCopyText(local, {
       device, localAt: at, remoteWriter: note.lastWriter, remoteAt: new Date(note.lastWriteAt), originalPath: key,
@@ -824,8 +829,8 @@ export class SyncEngine {
     if (theirs === null) throw new UnservedError(CANT_OPEN);
     if (theirs.version !== remote) return { remote: theirs.version };
     // A copy from a local edit's 409 comes with no check before it.
-    await this.readShared();
-    const copy = await this.freeCopyPath(conflictCopyPath(path, this.copyDevice, new Date(this.o.clock.now())));
+    const device = (await this.readShared()) ? null : this.o.device;
+    const copy = await this.freeCopyPath(conflictCopyPath(path, device, new Date(this.o.clock.now())));
     if (!(await this.o.local.writeBinaryIf(copy, null, bytes))) return { remote };
     const copyKey = this.copyMade(key, copy);
     let copyVersion = local;

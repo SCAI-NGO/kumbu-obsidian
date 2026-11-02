@@ -8,7 +8,8 @@ import {
 import { isMarker } from "../../src/engine/paths";
 import { normaliseText, versionOf, versionOfBytes } from "../../src/engine/version";
 
-type Method = keyof RemoteApi;
+/** vaults() is not among them: it never goes through enter, so hold and failNext would do nothing. */
+type Method = Exclude<keyof RemoteApi, "vaults">;
 interface StoredNote { content: string; lastWriter: string; at: string; version: Version; }
 interface StoredFile { bytes: Uint8Array; lastWriter: string; at: string; version: Version; }
 
