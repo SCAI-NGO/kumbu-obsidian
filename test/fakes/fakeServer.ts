@@ -13,6 +13,7 @@ interface StoredNote { content: string; lastWriter: string; at: string; version:
 interface StoredFile { bytes: Uint8Array; lastWriter: string; at: string; version: Version; }
 
 const OVERLAP_MS = 5 * 60_000;
+const WRITES = new Set<Method>(["put", "remove", "move", "putFile", "removeFile"]);
 
 export class FakeServer implements RemoteApi {
   readonly notes = new Map<string, StoredNote>();
@@ -30,6 +31,12 @@ export class FakeServer implements RemoteApi {
   readonly damagedPaths = new Set<string>();
   /** The writer label the device's own writes get. */
   deviceWriter = "Work – Obsidian Laptop";
+  /**
+   * A key that may not write: for a write on the path (a move's first argument is its source) it returns the sentence
+   * of a 403 with a code, which the client throws as a RejectedError; null lets the write through. Reads, agentWrite
+   * and the seeds are never refused.
+   */
+  refuse: ((path: string) => string | null) | null = null;
   private readonly holds = new Map<Method, Promise<void>[]>();
   private readonly failures = new Map<Method, Error[]>();
   private readonly dropped = new Set<Method>();
@@ -231,6 +238,8 @@ export class FakeServer implements RemoteApi {
     if (gate) await gate;
     const failure = this.failures.get(method)?.shift();
     if (failure) throw failure;
+    const sentence = WRITES.has(method) ? this.refuse?.(args[0] as string) ?? null : null;
+    if (sentence !== null) throw new RejectedError(sentence, 403);
   }
 
   private leave<T>(method: Method, result: T): T {
