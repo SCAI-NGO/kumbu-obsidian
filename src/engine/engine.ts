@@ -93,7 +93,7 @@ export class SyncEngine {
    */
   private readonly unserved = new Map<string, Version>();
   private supportsAttachments = false;
-  /** Others reach this vault: a conflict copy syncs to them, so it names no device. So until the server says otherwise. */
+  /** Others may reach this vault, and a conflict copy syncs to them, so it names no device until the server says the vault isn't shared. */
   private shared = true;
   private readonly conflicts = new Set<string>();
   private connection: ConnectionMode = "polling";

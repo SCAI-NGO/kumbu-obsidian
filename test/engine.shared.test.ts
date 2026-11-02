@@ -7,7 +7,7 @@ import { OfflineError, AuthError } from "../src/engine/ports";
 import { FakeFiles } from "./fakes/fakeFiles";
 import { fakeClock, harness, MemoryState, settle } from "./fakes/harness";
 
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 const READ_ONLY = "write: this key can only read vault Work";
 const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -127,7 +127,8 @@ describe("a refused change", () => {
     expect(h.files.files.get("d.md")).toBe("mine");
     expect(h.authLost).toBe(0);
     // The next check finds no base and decides a conflict: the file becomes Kumbu²'s text, and the chosen text moves
-    // to a copy. Nothing is lost, though it isn't quite what "keep local" chose; see "Not built".
+    // to a copy. Nothing is lost, though it isn't quite what "keep local" chose: a refused
+    // "keep local" isn't retried as such, and the maintainer decides whether it should be.
     await h.engine.check(true);
     expect([...h.files.files.values()].some((text) => text.includes("mine"))).toBe(true);
     expect(h.authLost).toBe(0);
@@ -281,7 +282,8 @@ describe("rejected meets a remote change", () => {
     await settle(h, 2000);
     await h.server.agentWrite("new.md", "theirs");
     await h.engine.check(false);
-    const [copy] = copiesOf(h.files.files.keys());
+    const [copy, ...more] = copiesOf(h.files.files.keys());
+    expect(more).toEqual([]);
     expect(h.files.files.get("new.md")).toBe("theirs");
     expect(h.files.files.get(copy!)).toContain("mine");
   });
