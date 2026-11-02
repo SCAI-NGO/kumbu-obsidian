@@ -2,7 +2,7 @@
 // In-memory RemoteApi that behaves like the server's endpoints, with scripted holds and failures.
 import {
   OfflineError, RejectedError,
-  type DeleteResult, type FileDeleteResult, type FileKind, type FilePutResult, type MoveResult, type PutResult,
+  type DeleteResult, type FileDeleteResult, type FileKind, type FilePutResult, type ListedVault, type MoveResult, type PutResult,
   type RemoteApi, type RemoteEntry, type RemoteFile, type RemoteNote, type Version, type VersionsAnswer,
 } from "../../src/engine/ports";
 import { isMarker } from "../../src/engine/paths";
@@ -37,6 +37,9 @@ export class FakeServer implements RemoteApi {
    * and the seeds are never refused.
    */
   refuse: ((path: string) => string | null) | null = null;
+  /** What GET /api/vaults says of Work: `shared`, "unlisted", "absent" (a server from before sharing), or it fails. */
+  listing: boolean | "unlisted" | "absent" | Error = false;
+  vaultsAsked = 0;
   private readonly holds = new Map<Method, Promise<void>[]>();
   private readonly failures = new Map<Method, Error[]>();
   private readonly dropped = new Set<Method>();
@@ -204,6 +207,15 @@ export class FakeServer implements RemoteApi {
     this.files.delete(path);
     this.touch(path);
     return { ok: true };
+  }
+
+  /** Not through enter: exact lists of calls in the tests stay about the sync's own requests. */
+  vaults(): Promise<ListedVault[]> {
+    this.vaultsAsked++;
+    if (this.listing instanceof Error) return Promise.reject(this.listing);
+    if (this.listing === "unlisted") return Promise.resolve([{ name: "Other", canWrite: true, shared: false }]);
+    if (this.listing === "absent") return Promise.resolve([{ name: "Work", canWrite: true }]);
+    return Promise.resolve([{ name: "Work", canWrite: true, shared: this.listing }]);
   }
 
   private refuseMarker(path: string): void {

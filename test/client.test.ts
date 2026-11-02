@@ -240,6 +240,17 @@ describe("tickets and vaults", () => {
       { name: "Read", notes: 1, embeddings: "internal", pending: false, canWrite: false }] });
     expect(await api(http).vaults()).toEqual([{ name: "Work", canWrite: true }, { name: "Read", canWrite: false }]);
   });
+
+  test("vaults hands on shared as the server says it, and absent as absent", async () => {
+    const http = fakeHttp({ status: 200, body: [
+      { name: "Beet", notes: 1, embeddings: "internal", pending: false, canWrite: false, level: "read", owner: "Alice", shared: true },
+      { name: "Mine", notes: 1, embeddings: "internal", pending: false, canWrite: true, level: "owner", owner: null, shared: false },
+      { name: "Old", notes: 1, embeddings: "internal", pending: false, canWrite: true }] });
+    const [beet, mine, old] = await api(http).vaults();
+    expect(beet!.shared).toBe(true);
+    expect(mine!.shared).toBe(false);
+    expect(old!.shared).toBeUndefined();
+  });
 });
 
 describe("pairing", () => {

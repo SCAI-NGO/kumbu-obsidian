@@ -132,6 +132,7 @@ function recording(api: KumbuApi): RemoteApi {
     readFile: (path) => api.readFile(path),
     putFile: async (path, bytes, base) => { const r = await api.putFile(path, bytes, base); note(path); return r; },
     removeFile: async (path, base) => { const r = await api.removeFile(path, base); note(path); return r; },
+    vaults: () => api.vaults(),
   };
 }
 

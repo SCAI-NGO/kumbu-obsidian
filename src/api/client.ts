@@ -2,7 +2,7 @@
 // The Kumbu² REST API over an injected HTTP function: requestUrl in Obsidian, fetch in Node.
 import {
   AuthError, OfflineError, RejectedError,
-  type DeleteResult, type FileDeleteResult, type FilePutResult, type MoveResult, type PutResult, type RemoteApi,
+  type DeleteResult, type FileDeleteResult, type FilePutResult, type ListedVault, type MoveResult, type PutResult, type RemoteApi,
   type RemoteEntry, type RemoteFile, type RemoteNote, type Version, type VersionsAnswer,
 } from "../engine/ports";
 import { fileUrlFor, fromApiPath, toApiPath, urlFor } from "../engine/paths";
@@ -168,10 +168,10 @@ export class KumbuApi implements RemoteApi {
     expectOk(r);
   }
 
-  async vaults(): Promise<{ name: string; canWrite: boolean }[]> {
+  async vaults(): Promise<ListedVault[]> {
     const r = await this.send("GET", "/api/vaults");
     expectOk(r);
-    return parse<VaultView[]>(r).map((v) => ({ name: v.name, canWrite: v.canWrite === true }));
+    return parse<VaultView[]>(r).map((v) => ({ name: v.name, canWrite: v.canWrite === true, shared: v.shared }));
   }
 
   /** The current note of a 409: from its body, or read when the body has none. */

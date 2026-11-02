@@ -61,7 +61,7 @@ export interface MovedView { message: string; path: string | null; version: stri
 export interface WsTicketView { ticket: string; expiresAt: string; }
 
 /** GET /api/vaults. */
-export interface VaultView { name: string; notes: number; embeddings: string; pending: boolean; canWrite?: boolean; }
+export interface VaultView { name: string; notes: number; embeddings: string; pending: boolean; canWrite?: boolean; shared?: boolean; }
 
 /** POST /api/pairing/redeem (anonymous). */
 export interface RedeemRequest { code: string; device: string; plugin: string; }

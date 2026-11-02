@@ -34,6 +34,8 @@ export class OfflineError extends Error {
   constructor(message: string, readonly retryAfterMs: number | null = null) { super(message); }
 }
 
+export interface ListedVault { name: string; canWrite: boolean; shared?: boolean; }
+
 export interface RemoteApi {
   versions(since: string | null, state: string | null): Promise<VersionsAnswer>;
   read(path: string): Promise<RemoteNote | null>;
@@ -44,6 +46,7 @@ export interface RemoteApi {
   readFile(path: string): Promise<RemoteFile | null>;
   putFile(path: string, bytes: ArrayBuffer, base: Version | null): Promise<FilePutResult>;
   removeFile(path: string, base: Version): Promise<FileDeleteResult>;
+  vaults(): Promise<ListedVault[]>;
 }
 
 export interface LocalFiles {

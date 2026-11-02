@@ -10,7 +10,7 @@ export class ConflictChoiceModal extends Modal {
   private choice: Choice = "both";
   private resolve: ((c: Choice | null) => void) | null = null;
 
-  constructor(app: App, private readonly plan: MergePlan, private readonly vault: string, private readonly device: string) {
+  constructor(app: App, private readonly plan: MergePlan, private readonly vault: string, private readonly device: string | null) {
     super(app);
   }
 

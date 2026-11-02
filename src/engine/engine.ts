@@ -93,6 +93,8 @@ export class SyncEngine {
    */
   private readonly unserved = new Map<string, Version>();
   private supportsAttachments = false;
+  /** Others reach this vault: a conflict copy syncs to them, so it names no device. So until the server says otherwise. */
+  private shared = true;
   private readonly conflicts = new Set<string>();
   private connection: ConnectionMode = "polling";
   private offline = false;
@@ -138,6 +140,21 @@ export class SyncEngine {
   /** The server keeps attachments, as its last versions answer said; false until one has come. */
   get attachmentsSupported(): boolean {
     return this.supportsAttachments;
+  }
+
+  /** What a conflict copy may name now: null to leave the device out. */
+  get copyDevice(): string | null {
+    return this.shared ? null : this.o.device;
+  }
+
+  /** Anything but a plain "not shared" counts as shared: the list failed, the vault isn't in it, the field is absent. */
+  private async readShared(): Promise<void> {
+    try {
+      const listed = (await this.o.remote.vaults()).find((v) => v.name === this.o.vault);
+      this.shared = listed?.shared !== false;
+    } catch {
+      this.shared = true;
+    }
   }
 
   /** The hint connection's mode; the engine shows "offline" over it while the server can't be reached. */
@@ -338,6 +355,7 @@ export class SyncEngine {
 
   private async runCheck(full: boolean): Promise<void> {
     const answer = await this.o.remote.versions(full ? null : this.state.cursor, null);
+    await this.readShared();
     const { remote, keys } = await this.resolve(answer);
     const damagedPossible = answer.full && answer.damaged > 0;
     let pathFailed = false;
@@ -472,6 +490,7 @@ export class SyncEngine {
 
   private async runFirstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
     const answer = await this.o.remote.versions(null, null);
+    await this.readShared();
     const { remote, keys } = await this.resolve(answer);
     const sides = new Map<string, { local: Version | null; remote: Version | null }>();
     for (const key of keys) {
@@ -764,12 +783,15 @@ export class SyncEngine {
     const note = await this.o.remote.read(key);
     if (note === null) return { remote: null };
     if (note.version !== remote) return { remote: note.version };
+    // A copy from a local edit's 409 comes with no check before it.
+    await this.readShared();
+    const device = this.copyDevice;
     const at = new Date(this.o.clock.now());
     const textOf = (local: string) => conflictCopyText(local, {
-      device: this.o.device, localAt: at, remoteWriter: note.lastWriter, remoteAt: new Date(note.lastWriteAt), originalPath: key,
+      device, localAt: at, remoteWriter: note.lastWriter, remoteAt: new Date(note.lastWriteAt), originalPath: key,
     });
     let copyText = textOf(text);
-    const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, at));
+    const copy = await this.freeCopyPath(conflictCopyPath(path, device, at));
     if (!(await this.o.local.writeIf(copy, null, copyText))) return { remote };
     // The copy is safe on disk before the original is overwritten, so a failure from here on loses nothing.
     const copyKey = this.copyMade(key, copy);
@@ -801,7 +823,9 @@ export class SyncEngine {
     const theirs = await this.o.remote.readFile(key);
     if (theirs === null) throw new UnservedError(CANT_OPEN);
     if (theirs.version !== remote) return { remote: theirs.version };
-    const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, new Date(this.o.clock.now())));
+    // A copy from a local edit's 409 comes with no check before it.
+    await this.readShared();
+    const copy = await this.freeCopyPath(conflictCopyPath(path, this.copyDevice, new Date(this.o.clock.now())));
     if (!(await this.o.local.writeBinaryIf(copy, null, bytes))) return { remote };
     const copyKey = this.copyMade(key, copy);
     let copyVersion = local;

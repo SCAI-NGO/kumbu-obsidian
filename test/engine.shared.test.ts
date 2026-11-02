@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { KumbuApi, type HttpFn } from "../src/api/client";
 import { FOLDER_SETTLE_MS, SyncEngine } from "../src/engine/engine";
+import { OfflineError, AuthError } from "../src/engine/ports";
 import { FakeFiles } from "./fakes/fakeFiles";
 import { fakeClock, harness, MemoryState, settle } from "./fakes/harness";
 
@@ -364,5 +365,135 @@ describe("open conflict copies", () => {
       "Plan (conflict 2026-10-27 10-15).md",
       "shot (conflict 2026-10-27 10-15).png",
     ]);
+  });
+});
+
+describe("conflict copies in a shared vault", () => {
+  const COPY = "projects/Plan (conflict 2026-10-27 10-15).md";
+
+  /** projects/Plan.md changed on both sides; the local edit's upload finds out. */
+  const bothChanged = async (h: Awaited<ReturnType<typeof harness>>) => {
+    await h.server.agentWrite("projects/Plan.md", "agent");
+    h.files.userEdit("projects/Plan.md", "mine");
+    h.engine.localChanged("projects/Plan.md");
+    await settle(h, 2000);
+  };
+
+  test("in a shared vault the copy names no device, in its name or its text", async () => {
+    const h = await harness({ synced: { "projects/Plan.md": "one" } });
+    h.server.listing = true;
+    await bothChanged(h);
+    expect(h.files.files.get(COPY)).toContain("> Change from **this device** at");
+    expect(h.files.files.get(COPY)).toContain("mine");
+    expect(h.files.files.get(COPY)).not.toContain("Laptop");
+    expect(h.server.notes.get(COPY)!.content).toBe(h.files.files.get(COPY));
+    expect([...h.files.files.keys(), ...h.server.notes.keys()].join()).not.toContain("Laptop");
+    expect(h.conflicts).toEqual([["projects/Plan.md", COPY]]);
+    expect(h.engine.status().conflicts).toEqual([COPY]);
+  });
+
+  test("an attachment's copy in a shared vault names no device", async () => {
+    const h = await harness({ remoteFiles: { "x.png": png(1) } });
+    h.server.listing = true;
+    await h.server.seedFile("x.png", png(2));
+    h.files.binaries.set("x.png", png(3));
+    h.engine.localChanged("x.png");
+    await settle(h, 2000);
+    expect(h.files.binaries.get("x (conflict 2026-10-27 10-15).png")).toEqual(png(3));
+  });
+
+  test("the device's own vault that isn't shared: nothing changes", async () => {
+    const h = await harness({ synced: { "projects/Plan.md": "one" } });
+    await bothChanged(h);
+    const copy = "projects/Plan (conflict Laptop 2026-10-27 10-15).md";
+    expect(h.files.files.get(copy)).toContain("> Change from **Laptop** at");
+  });
+
+  test.each<[string, boolean | "unlisted" | "absent" | Error]>([
+    ["the list fails offline", new OfflineError("down")],
+    ["the list says the key is lost", new AuthError("revoked")],
+    ["the list answers something odd", new TypeError("v.map is not a function")],
+    ["the vault isn't listed", "unlisted"],
+    ["the server says nothing of sharing", "absent"],
+  ])("%s: it fails closed", async (_, listing) => {
+    const h = await harness({ synced: { "projects/Plan.md": "one" } });
+    expect(h.engine.copyDevice).toBe("Laptop");
+    h.server.listing = listing;
+    await bothChanged(h);
+    expect(h.files.files.has(COPY)).toBe(true);
+    expect(h.engine.copyDevice).toBeNull();
+    expect(h.authLost).toBe(0);
+    expect(h.engine.status().mode).not.toBe("offline");
+  });
+
+  test("before the server has said anything, the vault counts as shared", async () => {
+    const h = await harness({ start: false });
+    expect(h.engine.copyDevice).toBeNull();
+  });
+
+  test("a check asks, whether or not it finds a conflict", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    h.server.vaultsAsked = 0;
+    await h.engine.check(false);
+    expect(h.server.vaultsAsked).toBe(1);
+    await h.engine.check(true);
+    expect(h.server.vaultsAsked).toBe(2);
+  });
+
+  test("a vault shared later, or no longer shared, is seen by the next check", async () => {
+    const h = await harness({ synced: { "a.md": "one" } });
+    h.server.listing = true;
+    await h.engine.check(false);
+    expect(h.engine.copyDevice).toBeNull();
+    h.server.listing = false;
+    await h.engine.check(false);
+    expect(h.engine.copyDevice).toBe("Laptop");
+  });
+
+  test("a vault shared since the last check is seen when the copy is made", async () => {
+    const h = await harness({ synced: { "projects/Plan.md": "one" } });
+    expect(h.engine.copyDevice).toBe("Laptop");
+    h.server.listing = true;
+    await bothChanged(h);
+    expect(h.files.files.has(COPY)).toBe(true);
+  });
+
+  test("an attachment in a vault shared since the last check", async () => {
+    const h = await harness({ remoteFiles: { "x.png": png(1) } });
+    expect(h.engine.copyDevice).toBe("Laptop");
+    h.server.listing = true;
+    await h.server.seedFile("x.png", png(2));
+    h.files.binaries.set("x.png", png(3));
+    h.engine.localChanged("x.png");
+    await settle(h, 2000);
+    expect(h.files.binaries.has("x (conflict 2026-10-27 10-15).png")).toBe(true);
+  });
+
+  test("a first sync asks first, so its question and its copies name no device", async () => {
+    const h = await harness({ start: false, localOnly: { "d.md": "mine" }, remoteOnly: { "d.md": "kumbu" } });
+    h.server.listing = true;
+    const asked: (string | null)[] = [];
+    await h.engine.firstSync(() => { asked.push(h.engine.copyDevice); return Promise.resolve("both"); });
+    expect(asked).toEqual([null]);
+    expect(h.files.files.get("d (conflict 2026-10-27 10-15).md")).toContain("mine");
+  });
+
+  test("a first sync in an own vault still names the device", async () => {
+    const h = await harness({ start: false, localOnly: { "d.md": "mine" }, remoteOnly: { "d.md": "kumbu" } });
+    const asked: (string | null)[] = [];
+    await h.engine.firstSync(() => { asked.push(h.engine.copyDevice); return Promise.resolve("both"); });
+    expect(asked).toEqual(["Laptop"]);
+    expect(h.files.files.has("d (conflict Laptop 2026-10-27 10-15).md")).toBe(true);
+  });
+
+  test("two copies in one minute both name no device and both count", async () => {
+    const h = await harness({ synced: { "projects/Plan.md": "one" } });
+    h.server.listing = true;
+    await bothChanged(h);
+    await h.server.agentWrite("projects/Plan.md", "agent again");
+    h.files.userEdit("projects/Plan.md", "mine again");
+    h.engine.localChanged("projects/Plan.md");
+    await settle(h, 2000);
+    expect(h.engine.status().conflicts).toEqual(["projects/Plan (conflict 2026-10-27 10-15) 2.md", COPY]);
   });
 });
