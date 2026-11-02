@@ -650,7 +650,7 @@ export class SyncEngine {
         this.dirty.delete(key);
         return;
       }
-      if (outgoing || this.rejected.get(key)?.version === UNEXPECTED) this.rejected.delete(key);
+      if (outgoing || action.kind === "nothing" || this.rejected.get(key)?.version === UNEXPECTED) this.rejected.delete(key);
       if (again === undefined) {
         this.dirty.delete(key);
         return;

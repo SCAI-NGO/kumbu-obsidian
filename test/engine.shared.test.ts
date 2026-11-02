@@ -198,3 +198,152 @@ describe("a refused folder marker", () => {
     expect(h.authLost).toBe(0);
   });
 });
+
+describe("rejected meets a remote change", () => {
+  const copiesOf = (paths: Iterable<string>) => [...paths].filter((p) => p.includes("(conflict "));
+
+  /** plan.md changed here and refused, as a read-only member's edit is. */
+  const refused = async () => {
+    const h = await harness({ synced: { "plan.md": "one" } });
+    h.server.refuse = () => READ_ONLY;
+    h.files.userEdit("plan.md", "mine");
+    h.engine.localChanged("plan.md");
+    await settle(h, 2000);
+    expect(h.engine.status().notSynced.map((n) => n.path)).toEqual(["plan.md"]);
+    return h;
+  };
+
+  test("a refused edit meets a remote change: the text survives in a copy", async () => {
+    const h = await refused();
+    await h.server.agentWrite("plan.md", "theirs");
+    await h.engine.check(false);
+    const [copy, ...more] = copiesOf(h.files.files.keys());
+    expect(more).toEqual([]);
+    expect(h.files.files.get("plan.md")).toBe("theirs");
+    expect(h.files.files.get(copy!)).toContain("mine");
+    expect(h.conflicts).toEqual([["plan.md", copy]]);
+    expect(h.engine.status().conflicts).toEqual([copy]);
+    // The original is settled; the copy is refused in its turn, so it stays here, listed, and reaches nobody.
+    expect(h.engine.status().notSynced).toEqual([{ path: copy, reason: "rejected", detail: READ_ONLY }]);
+    expect(h.server.notes.has(copy!)).toBe(false);
+    expect(h.authLost).toBe(0);
+  });
+
+  test("no second copy and no resend after that", async () => {
+    const h = await refused();
+    await h.server.agentWrite("plan.md", "theirs");
+    await h.engine.check(false);
+    const puts = h.server.count("put");
+    await h.engine.check(true);
+    await h.engine.check(false);
+    expect(copiesOf(h.files.files.keys())).toHaveLength(1);
+    expect(h.server.count("put")).toBe(puts);
+    expect(h.files.files.get("plan.md")).toBe("theirs");
+  });
+
+  test("an edit typed after the refusal is what the copy keeps", async () => {
+    const h = await refused();
+    h.files.userEdit("plan.md", "mine, later");
+    h.engine.localChanged("plan.md");
+    await h.server.agentWrite("plan.md", "theirs");
+    await h.engine.check(false);
+    await settle(h, 2000);
+    const [copy, ...more] = copiesOf(h.files.files.keys());
+    expect(more).toEqual([]);
+    expect(h.files.files.get(copy!)).toContain("mine, later");
+    expect(h.files.files.get("plan.md")).toBe("theirs");
+  });
+
+  test("the same text arriving from Kumbu² settles it without a copy", async () => {
+    const h = await refused();
+    await h.server.agentWrite("plan.md", "mine");
+    await h.engine.check(false);
+    expect(copiesOf(h.files.files.keys())).toEqual([]);
+    expect(h.engine.status().notSynced).toEqual([]);
+  });
+
+  test("the note deleted in Kumbu² keeps the refused text here", async () => {
+    const h = await refused();
+    await h.server.agentWrite("plan.md", null);
+    await h.engine.check(false);
+    expect(h.files.files.get("plan.md")).toBe("mine");
+    expect(h.files.trash).toEqual([]);
+    expect(h.server.count("put")).toBe(1);
+    expect(h.engine.status().notSynced.map((n) => n.path)).toEqual(["plan.md"]);
+  });
+
+  test("a refused new note meets a note of that name in Kumbu²: the text survives in a copy", async () => {
+    const h = await harness();
+    h.server.refuse = () => READ_ONLY;
+    h.files.files.set("new.md", "mine");
+    h.engine.localChanged("new.md");
+    await settle(h, 2000);
+    await h.server.agentWrite("new.md", "theirs");
+    await h.engine.check(false);
+    const [copy] = copiesOf(h.files.files.keys());
+    expect(h.files.files.get("new.md")).toBe("theirs");
+    expect(h.files.files.get(copy!)).toContain("mine");
+  });
+
+  test("a refused trash meets a remote change: the server's version comes back", async () => {
+    const h = await harness({ synced: { "plan.md": "one" } });
+    h.server.refuse = () => READ_ONLY;
+    h.files.userDelete("plan.md");
+    h.engine.localDeleted("plan.md");
+    await settle(h);
+    await h.server.agentWrite("plan.md", "theirs");
+    await h.engine.check(false);
+    expect(h.files.files.get("plan.md")).toBe("theirs");
+    expect(h.engine.status().notSynced).toEqual([]);
+    expect(copiesOf(h.files.files.keys())).toEqual([]);
+  });
+
+  test("a refused attachment meets a remote change: its bytes survive in a copy", async () => {
+    const h = await harness({ remoteFiles: { "x.png": png(1) } });
+    h.server.refuse = () => READ_ONLY;
+    h.files.binaries.set("x.png", png(2));
+    h.engine.localChanged("x.png");
+    await settle(h, 2000);
+    await h.server.seedFile("x.png", png(3));
+    await h.engine.check(false);
+    const [copy, ...more] = copiesOf(h.files.binaries.keys());
+    expect(more).toEqual([]);
+    expect(h.files.binaries.get("x.png")).toEqual(png(3));
+    expect(h.files.binaries.get(copy!)).toEqual(png(2));
+    expect(h.server.files.has(copy!)).toBe(false);
+    expect(h.engine.status().notSynced.map((n) => n.path)).toEqual([copy]);
+  });
+
+  test("a refused edit taken back leaves the list", async () => {
+    const h = await refused();
+    h.files.userEdit("plan.md", "one");
+    h.engine.localChanged("plan.md");
+    await settle(h, 2000);
+    expect(h.engine.status().notSynced).toEqual([]);
+    expect(h.server.count("put")).toBe(1);
+  });
+
+  test("a refused new note deleted leaves the list", async () => {
+    const h = await harness();
+    h.server.refuse = () => READ_ONLY;
+    h.files.files.set("new.md", "mine");
+    h.engine.localChanged("new.md");
+    await settle(h, 2000);
+    h.files.userDelete("new.md");
+    h.engine.localDeleted("new.md");
+    await settle(h);
+    expect(h.engine.status().notSynced).toEqual([]);
+  });
+
+  test("a refused trash taken back leaves the list", async () => {
+    const h = await harness({ synced: { "plan.md": "one" } });
+    h.server.refuse = () => READ_ONLY;
+    h.files.userDelete("plan.md");
+    h.engine.localDeleted("plan.md");
+    await settle(h);
+    h.files.files.set("plan.md", "one");
+    h.engine.localChanged("plan.md");
+    await settle(h, 2000);
+    expect(h.engine.status().notSynced).toEqual([]);
+  });
+});
