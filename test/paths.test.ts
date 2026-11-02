@@ -34,6 +34,11 @@ test("conflict copy sits next to the original", () => {
   expect(conflictCopyPath("Plan.md", "Laptop", new Date(2026, 0, 2, 3, 4)))
     .toBe("Plan (conflict Laptop 2026-01-02 03-04).md");
 });
+test("a conflict copy in a shared vault names no device", () => {
+  expect(conflictCopyPath("projects/Plan.md", null, new Date(2026, 9, 27, 10, 15))).toBe("projects/Plan (conflict 2026-10-27 10-15).md");
+  expect(conflictCopyPath("shot.png", null, new Date(2026, 9, 27, 22, 15))).toBe("shot (conflict 2026-10-27 22-15).png");
+  expect(conflictCopyPath("scans/a.b/Scan.PDF", null, new Date(2026, 9, 27, 22, 15))).toBe("scans/a.b/Scan (conflict 2026-10-27 22-15).PDF");
+});
 test("a conflict copy keeps an attachment's extension", () => {
   expect(conflictCopyPath("layout_editor_bad1.png", "Laptop", new Date(2026, 9, 27, 22, 15)))
     .toBe("layout_editor_bad1 (conflict Laptop 2026-10-27 22-15).png");

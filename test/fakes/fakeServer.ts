@@ -2,17 +2,19 @@
 // In-memory RemoteApi that behaves like the server's endpoints, with scripted holds and failures.
 import {
   OfflineError, RejectedError,
-  type DeleteResult, type FileDeleteResult, type FileKind, type FilePutResult, type MoveResult, type PutResult,
+  type DeleteResult, type FileDeleteResult, type FileKind, type FilePutResult, type ListedVault, type MoveResult, type PutResult,
   type RemoteApi, type RemoteEntry, type RemoteFile, type RemoteNote, type Version, type VersionsAnswer,
 } from "../../src/engine/ports";
 import { isMarker } from "../../src/engine/paths";
 import { normaliseText, versionOf, versionOfBytes } from "../../src/engine/version";
 
-type Method = keyof RemoteApi;
+/** vaults() is not among them: it never goes through enter, so hold and failNext would do nothing. */
+type Method = Exclude<keyof RemoteApi, "vaults">;
 interface StoredNote { content: string; lastWriter: string; at: string; version: Version; }
 interface StoredFile { bytes: Uint8Array; lastWriter: string; at: string; version: Version; }
 
 const OVERLAP_MS = 5 * 60_000;
+const WRITES = new Set<Method>(["put", "remove", "move", "putFile", "removeFile"]);
 
 export class FakeServer implements RemoteApi {
   readonly notes = new Map<string, StoredNote>();
@@ -30,6 +32,15 @@ export class FakeServer implements RemoteApi {
   readonly damagedPaths = new Set<string>();
   /** The writer label the device's own writes get. */
   deviceWriter = "Work – Obsidian Laptop";
+  /**
+   * A key that may not write: for a write on the path (a move's first argument is its source) it returns the sentence
+   * of a 403 with a code, which the client throws as a RejectedError; null lets the write through. Reads, agentWrite
+   * and the seeds are never refused.
+   */
+  refuse: ((path: string) => string | null) | null = null;
+  /** What GET /api/vaults says of Work: `shared`, "unlisted", "absent" (a server from before sharing), or it fails. */
+  listing: boolean | "unlisted" | "absent" | Error = false;
+  vaultsAsked = 0;
   private readonly holds = new Map<Method, Promise<void>[]>();
   private readonly failures = new Map<Method, Error[]>();
   private readonly dropped = new Set<Method>();
@@ -199,6 +210,15 @@ export class FakeServer implements RemoteApi {
     return { ok: true };
   }
 
+  /** Not through enter: exact lists of calls in the tests stay about the sync's own requests. */
+  vaults(): Promise<ListedVault[]> {
+    this.vaultsAsked++;
+    if (this.listing instanceof Error) return Promise.reject(this.listing);
+    if (this.listing === "unlisted") return Promise.resolve([{ name: "Other", canWrite: true, shared: false }]);
+    if (this.listing === "absent") return Promise.resolve([{ name: "Work", canWrite: true }]);
+    return Promise.resolve([{ name: "Work", canWrite: true, shared: this.listing }]);
+  }
+
   private refuseMarker(path: string): void {
     if (isMarker(path) && this.attachmentsSupported && !this.markersSupported) {
       throw new RejectedError(`/Work/${path} is neither a note nor a file Kumbu² keeps.`, 400);
@@ -231,6 +251,8 @@ export class FakeServer implements RemoteApi {
     if (gate) await gate;
     const failure = this.failures.get(method)?.shift();
     if (failure) throw failure;
+    const sentence = WRITES.has(method) ? this.refuse?.(args[0] as string) ?? null : null;
+    if (sentence !== null) throw new RejectedError(sentence, 403);
   }
 
   private leave<T>(method: Method, result: T): T {

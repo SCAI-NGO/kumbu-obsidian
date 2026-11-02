@@ -2,7 +2,7 @@
 // The Kumbu² REST API over an injected HTTP function: requestUrl in Obsidian, fetch in Node.
 import {
   AuthError, OfflineError, RejectedError,
-  type DeleteResult, type FileDeleteResult, type FilePutResult, type MoveResult, type PutResult, type RemoteApi,
+  type DeleteResult, type FileDeleteResult, type FilePutResult, type ListedVault, type MoveResult, type PutResult, type RemoteApi,
   type RemoteEntry, type RemoteFile, type RemoteNote, type Version, type VersionsAnswer,
 } from "../engine/ports";
 import { fileUrlFor, fromApiPath, toApiPath, urlFor } from "../engine/paths";
@@ -168,10 +168,10 @@ export class KumbuApi implements RemoteApi {
     expectOk(r);
   }
 
-  async vaults(): Promise<{ name: string; canWrite: boolean }[]> {
+  async vaults(): Promise<ListedVault[]> {
     const r = await this.send("GET", "/api/vaults");
     expectOk(r);
-    return parse<VaultView[]>(r).map((v) => ({ name: v.name, canWrite: v.canWrite === true }));
+    return parse<VaultView[]>(r).map((v) => ({ name: v.name, canWrite: v.canWrite === true, shared: v.shared }));
   }
 
   /** The current note of a 409: from its body, or read when the body has none. */
@@ -204,8 +204,8 @@ export class KumbuApi implements RemoteApi {
 
 const RETRY_SAME_CODE = "Try again in a moment with the same code.";
 
-export async function redeemPairing(http: HttpFn, server: string, code: string, device: string): Promise<RedeemView> {
-  const body: RedeemRequest = { code: normalisePairingCode(code), device: device.trim() };
+export async function redeemPairing(http: HttpFn, server: string, code: string, device: string, plugin: string): Promise<RedeemView> {
+  const body: RedeemRequest = { code: normalisePairingCode(code), device: device.trim(), plugin };
   let r: HttpResponse;
   try {
     r = await call(http, { method: "POST", url: `${trimServer(server)}/api/pairing/redeem`, headers: {} }, body);
@@ -218,6 +218,8 @@ export async function redeemPairing(http: HttpFn, server: string, code: string, 
     throw new OfflineError(`${errorOf(r) ?? `The server answered ${r.status}.`} ${RETRY_SAME_CODE}`, retryAfterMs(r));
   }
   if (r.status === 409) {
+    // The code still works and the device name has nothing to do with it.
+    if (errorField(r, "type") === "plugin-too-old") throw new RejectedError(errorOf(r) ?? "Update the Kumbu² plugin to sync this shared vault.", 409);
     // Every "<Vault> – Obsidian <device>" name up to " 20" is taken, and the code is used up.
     throw new RejectedError(`${errorOf(r) ?? "That key name is taken."} Change the device name and make a new code in the web app.`, 409);
   }
@@ -250,6 +252,8 @@ async function call(http: HttpFn, request: HttpRequest, body?: unknown): Promise
 function expectOk(r: HttpResponse): void {
   if (r.status >= 200 && r.status < 300) return;
   const sentence = errorOf(r);
+  // A refusal in a shared vault is no revoked key, and an unknown code counts too, so that a newer server doesn't stop an older plugin's sync.
+  if (r.status === 403 && errorField(r, "code") !== null) throw new RejectedError(sentence ?? "The server refused this change.", 403);
   if (r.status === 401 || r.status === 403) throw new AuthError(sentence ?? "This key expired or was revoked.");
   if (r.status === 503 || r.status === 429 || r.status >= 500 || r.status === 408) {
     throw new OfflineError(sentence ?? `The server answered ${r.status}.`, retryAfterMs(r));
@@ -291,4 +295,9 @@ function tryParse<T>(r: HttpResponse): T | null {
 function errorOf(r: HttpResponse): string | null {
   const view = tryParse<Partial<ErrorView>>(r);
   return typeof view?.error === "string" && view.error ? view.error : null;
+}
+
+function errorField(r: HttpResponse, field: "code" | "type"): string | null {
+  const value = tryParse<Partial<ErrorView>>(r)?.[field];
+  return typeof value === "string" && value ? value : null;
 }

@@ -44,7 +44,7 @@ const MAX_ROUNDS = 4;
 const UNEXPECTED = "!";
 /** The version of an attachment too large to read: never equal to a real one, so it always differs from both sides. */
 const TOO_LARGE = "!too-large";
-const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$/;
+const COPY_NAME = /\(conflict (?:.+ )?\d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$/;
 
 /**
  * Kumbu² lists the path with a version but doesn't hand its bytes over (they don't open, or the vault is locked): not a
@@ -93,6 +93,8 @@ export class SyncEngine {
    */
   private readonly unserved = new Map<string, Version>();
   private supportsAttachments = false;
+  /** Others may reach this vault, and a conflict copy syncs to them, so it names no device until the server says the vault isn't shared. */
+  private shared = true;
   private readonly conflicts = new Set<string>();
   private connection: ConnectionMode = "polling";
   private offline = false;
@@ -138,6 +140,27 @@ export class SyncEngine {
   /** The server keeps attachments, as its last versions answer said; false until one has come. */
   get attachmentsSupported(): boolean {
     return this.supportsAttachments;
+  }
+
+  /** What a conflict copy may name now: null to leave the device out. */
+  get copyDevice(): string | null {
+    return this.shared ? null : this.o.device;
+  }
+
+  /**
+   * Anything but a plain "not shared" counts as shared: the list failed, the vault isn't in it, the field is absent.
+   * Returns what it settled on, so a copy goes by its own answer rather than whichever answer came last.
+   */
+  private async readShared(): Promise<boolean> {
+    let shared: boolean;
+    try {
+      const listed = (await this.o.remote.vaults()).find((v) => v.name === this.o.vault);
+      shared = listed?.shared !== false;
+    } catch {
+      shared = true;
+    }
+    this.shared = shared;
+    return shared;
   }
 
   /** The hint connection's mode; the engine shows "offline" over it while the server can't be reached. */
@@ -338,6 +361,7 @@ export class SyncEngine {
 
   private async runCheck(full: boolean): Promise<void> {
     const answer = await this.o.remote.versions(full ? null : this.state.cursor, null);
+    await this.readShared();
     const { remote, keys } = await this.resolve(answer);
     const damagedPossible = answer.full && answer.damaged > 0;
     let pathFailed = false;
@@ -472,6 +496,7 @@ export class SyncEngine {
 
   private async runFirstSync(choose: (plan: MergePlan) => Promise<Choice | null>): Promise<FirstSyncSummary | null> {
     const answer = await this.o.remote.versions(null, null);
+    await this.readShared();
     const { remote, keys } = await this.resolve(answer);
     const sides = new Map<string, { local: Version | null; remote: Version | null }>();
     for (const key of keys) {
@@ -635,9 +660,10 @@ export class SyncEngine {
           return;
         }
         if (!(e instanceof RejectedError)) throw e;
-        if (isMarker(key)) {
+        if (isMarker(key) && e.status !== 403) {
           // A server from before folder markers knows no such file: final for this run, and nothing to list. Markers are
-          // then off both ways until the next start(), whose full check compares every one with its base again.
+          // then off both ways until the next start(), whose full check compares every one with its base again. A refusal
+          // (403) says nothing about what the server keeps: that marker is only not sent again, below.
           if (!this.markersRefused) {
             console.warn(`Kumbu² Sync: this server keeps no empty folders (${e.message}); they stay in Obsidian only until the server is updated.`);
           }
@@ -649,7 +675,7 @@ export class SyncEngine {
         this.dirty.delete(key);
         return;
       }
-      if (outgoing || this.rejected.get(key)?.version === UNEXPECTED) this.rejected.delete(key);
+      if (outgoing || action.kind === "nothing" || this.rejected.get(key)?.version === UNEXPECTED) this.rejected.delete(key);
       if (again === undefined) {
         this.dirty.delete(key);
         return;
@@ -763,12 +789,14 @@ export class SyncEngine {
     const note = await this.o.remote.read(key);
     if (note === null) return { remote: null };
     if (note.version !== remote) return { remote: note.version };
+    // A copy from a local edit's 409 comes with no check before it.
+    const device = (await this.readShared()) ? null : this.o.device;
     const at = new Date(this.o.clock.now());
     const textOf = (local: string) => conflictCopyText(local, {
-      device: this.o.device, localAt: at, remoteWriter: note.lastWriter, remoteAt: new Date(note.lastWriteAt), originalPath: key,
+      device, localAt: at, remoteWriter: note.lastWriter, remoteAt: new Date(note.lastWriteAt), originalPath: key,
     });
     let copyText = textOf(text);
-    const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, at));
+    const copy = await this.freeCopyPath(conflictCopyPath(path, device, at));
     if (!(await this.o.local.writeIf(copy, null, copyText))) return { remote };
     // The copy is safe on disk before the original is overwritten, so a failure from here on loses nothing.
     const copyKey = this.copyMade(key, copy);
@@ -800,7 +828,9 @@ export class SyncEngine {
     const theirs = await this.o.remote.readFile(key);
     if (theirs === null) throw new UnservedError(CANT_OPEN);
     if (theirs.version !== remote) return { remote: theirs.version };
-    const copy = await this.freeCopyPath(conflictCopyPath(path, this.o.device, new Date(this.o.clock.now())));
+    // A copy from a local edit's 409 comes with no check before it.
+    const device = (await this.readShared()) ? null : this.o.device;
+    const copy = await this.freeCopyPath(conflictCopyPath(path, device, new Date(this.o.clock.now())));
     if (!(await this.o.local.writeBinaryIf(copy, null, bytes))) return { remote };
     const copyKey = this.copyMade(key, copy);
     let copyVersion = local;

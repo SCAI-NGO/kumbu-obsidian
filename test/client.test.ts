@@ -177,6 +177,47 @@ describe("errors", () => {
   });
 });
 
+describe("refusals", () => {
+  const writes: [string, (c: KumbuApi) => Promise<unknown>][] = [
+    ["put, creating", (c) => c.put("a.md", "x", null)],
+    ["put, over a version", (c) => c.put("a.md", "x", "bbbbbbbbbbbb")],
+    ["remove", (c) => c.remove("a.md", "bbbbbbbbbbbb")],
+    ["move", (c) => c.move("a.md", "b.md")],
+    ["putFile, creating", (c) => c.putFile("a.png", new ArrayBuffer(1), null)],
+    ["putFile, over a version", (c) => c.putFile("a.png", new ArrayBuffer(1), "bbbbbbbbbbbb")],
+    ["removeFile", (c) => c.removeFile("a.png", "bbbbbbbbbbbb")],
+  ];
+  const SENTENCE = "write: this key can only read vault Work";
+
+  test.each(writes)("%s: a 403 with a code is rejected with the server's sentence", async (_, write) => {
+    const e = await write(api(fakeHttp({ status: 403, body: { error: SENTENCE, code: "read-only" } }))).catch((x: unknown) => x) as RejectedError;
+    expect(e).toBeInstanceOf(RejectedError);
+    expect(e.message).toBe(SENTENCE);
+    expect(e.status).toBe(403);
+  });
+  test.each(writes)("%s: a 403 without a code means the key is lost", async (_, write) => {
+    await expect(write(api(fakeHttp({ status: 403, body: { error: "No." } })))).rejects.toBeInstanceOf(AuthError);
+  });
+  test.each(["read-only", "structural", "closing", "owner-inactive", "a-code-from-a-newer-server"])("the code %s is a refusal", async (code) => {
+    await expect(api(fakeHttp({ status: 403, body: { error: SENTENCE, code } })).put("a.md", "x", null)).rejects.toBeInstanceOf(RejectedError);
+  });
+  test.each([[""], [7], [null]])("a code that is no code (%j) isn't a refusal", async (code) => {
+    await expect(api(fakeHttp({ status: 403, body: { error: SENTENCE, code } })).put("a.md", "x", null)).rejects.toBeInstanceOf(AuthError);
+  });
+  test("a 403 with a code and no sentence still has one", async () => {
+    const e = await api(fakeHttp({ status: 403, body: { code: "read-only" } })).put("a.md", "x", null).catch((x: unknown) => x) as RejectedError;
+    expect(e).toBeInstanceOf(RejectedError);
+    expect(e.message).not.toBe("");
+  });
+  test("a 401 with a code stays a lost key", async () => {
+    await expect(api(fakeHttp({ status: 401, body: { error: "No.", code: "read-only" } })).put("a.md", "x", null)).rejects.toBeInstanceOf(AuthError);
+  });
+  test("revoking this key takes any 403 as revoked, with a code or without", async () => {
+    await api(fakeHttp({ status: 403, body: { error: "No." } })).revokeSelf();
+    await api(fakeHttp({ status: 403, body: { error: SENTENCE, code: "read-only" } })).revokeSelf();
+  });
+});
+
 describe("tickets and vaults", () => {
   test("wsTicket posts with the key", async () => {
     const http = fakeHttp({ status: 200, body: { ticket: "kumbu_wst_x", expiresAt: "2026-10-27T10:00:30Z" } });
@@ -199,6 +240,17 @@ describe("tickets and vaults", () => {
       { name: "Read", notes: 1, embeddings: "internal", pending: false, canWrite: false }] });
     expect(await api(http).vaults()).toEqual([{ name: "Work", canWrite: true }, { name: "Read", canWrite: false }]);
   });
+
+  test("vaults hands on shared as the server says it, and absent as absent", async () => {
+    const http = fakeHttp({ status: 200, body: [
+      { name: "Beet", notes: 1, embeddings: "internal", pending: false, canWrite: false, level: "read", owner: "Alice", shared: true },
+      { name: "Mine", notes: 1, embeddings: "internal", pending: false, canWrite: true, level: "owner", owner: null, shared: false },
+      { name: "Old", notes: 1, embeddings: "internal", pending: false, canWrite: true }] });
+    const [beet, mine, old] = await api(http).vaults();
+    expect(beet!.shared).toBe(true);
+    expect(mine!.shared).toBe(false);
+    expect(old!.shared).toBeUndefined();
+  });
 });
 
 describe("pairing", () => {
@@ -208,40 +260,57 @@ describe("pairing", () => {
   });
   test("redeem posts code and device without Authorization", async () => {
     const http = fakeHttp({ status: 201, body: { key: "kumbu_k", vault: "Work", keyName: "Work – Obsidian Laptop" } });
-    expect(await redeemPairing(http, "https://k.example/", "k7qm-4xda", "Laptop")).toEqual({ key: "kumbu_k", vault: "Work", keyName: "Work – Obsidian Laptop" });
+    expect(await redeemPairing(http, "https://k.example/", "k7qm-4xda", "Laptop", "0.2.0")).toEqual({ key: "kumbu_k", vault: "Work", keyName: "Work – Obsidian Laptop" });
     expect(http.last).toMatchObject({ method: "POST", url: "https://k.example/api/pairing/redeem" });
     expect(http.last!.headers.Authorization).toBeUndefined();
-    expect(jsonOf(http.last)).toEqual({ code: "K7QM4XDA", device: "Laptop" });
+    expect(jsonOf(http.last)).toEqual({ code: "K7QM4XDA", device: "Laptop", plugin: "0.2.0" });
   });
   test("a wrong code says the server's sentence", async () => {
-    const p = redeemPairing(fakeHttp({ status: 404, body: { error: "This pairing code is not valid (any more)." } }), "https://k.example", "x", "L");
+    const p = redeemPairing(fakeHttp({ status: 404, body: { error: "This pairing code is not valid (any more)." } }), "https://k.example", "x", "L", "0.2.0");
     await expect(p).rejects.toBeInstanceOf(RejectedError);
     await expect(p).rejects.toThrow("This pairing code is not valid (any more).");
   });
   test("a wrong code without a sentence has a default", async () => {
-    await expect(redeemPairing(fakeHttp({ status: 404 }), "https://k.example", "x", "L")).rejects.toThrow("This code is not valid (any more).");
+    await expect(redeemPairing(fakeHttp({ status: 404 }), "https://k.example", "x", "L", "0.2.0")).rejects.toThrow("This code is not valid (any more).");
   });
   test("a taken key name says what to do next", async () => {
-    const p = redeemPairing(fakeHttp({ status: 409, body: { error: "You already have an API key or connection named 'Work – Obsidian L 20'." } }), "https://k.example", "x", "L");
+    const p = redeemPairing(fakeHttp({ status: 409, body: { error: "You already have an API key or connection named 'Work – Obsidian L 20'." } }), "https://k.example", "x", "L", "0.2.0");
     await expect(p).rejects.toThrow("You already have an API key or connection named 'Work – Obsidian L 20'. Change the device name and make a new code in the web app.");
     await expect(p).rejects.toMatchObject({ status: 409 });
   });
   test("a bad device name keeps its status, so the code can be kept for a retry", async () => {
-    await expect(redeemPairing(fakeHttp({ status: 400, body: { error: "Bad device name." } }), "https://k.example", "x", "L")).rejects.toMatchObject({ status: 400 });
+    await expect(redeemPairing(fakeHttp({ status: 400, body: { error: "Bad device name." } }), "https://k.example", "x", "L", "0.2.0")).rejects.toMatchObject({ status: 400 });
   });
   test("a busy or failing server keeps the code: retry with the same one", async () => {
     for (const reply of [{ status: 503, headers: { "Retry-After": "5" }, body: { error: "The vault is being re-encrypted." } }, { status: 500 }]) {
-      const p = redeemPairing(fakeHttp(reply), "https://k.example", "K7QM4XDA", "L");
+      const p = redeemPairing(fakeHttp(reply), "https://k.example", "K7QM4XDA", "L", "0.2.0");
       await expect(p).rejects.toBeInstanceOf(OfflineError);
       await expect(p).rejects.toThrow("Try again in a moment with the same code.");
     }
-    const network = redeemPairing(fakeHttp(new TypeError("fetch failed")), "https://k.example", "K7QM4XDA", "L");
+    const network = redeemPairing(fakeHttp(new TypeError("fetch failed")), "https://k.example", "K7QM4XDA", "L", "0.2.0");
     await expect(network).rejects.toThrow("Try again in a moment with the same code.");
   });
   test("too many attempts (also for a right code, while the server-wide limit holds) keeps the code: wait and retry", async () => {
-    const p = redeemPairing(fakeHttp({ status: 429, headers: { "Retry-After": "30" }, body: { error: "Too many attempts." } }), "https://k.example", "K7QM4XDA", "L");
+    const p = redeemPairing(fakeHttp({ status: 429, headers: { "Retry-After": "30" }, body: { error: "Too many attempts." } }), "https://k.example", "K7QM4XDA", "L", "0.2.0");
     await expect(p).rejects.toBeInstanceOf(OfflineError);
     await expect(p).rejects.toThrow("Too many attempts. Try again in a moment with the same code.");
     await expect(p).rejects.toMatchObject({ retryAfterMs: 30000 });
+  });
+  const TOO_OLD = "Update the Kumbu² plugin to 0.2.0 or newer to sync a shared vault.";
+
+  test("a plugin too old for a shared vault shows the server's sentence alone", async () => {
+    const http = fakeHttp({ status: 409, body: { error: TOO_OLD, type: "plugin-too-old" } });
+    const e = await redeemPairing(http, "https://k.example", "x", "L", "0.1.2").catch((x: unknown) => x) as RejectedError;
+    expect(e).toBeInstanceOf(RejectedError);
+    expect(e.message).toBe(TOO_OLD);
+    expect(e.status).toBe(409);
+  });
+  test("a 409 of another type still says to change the device name", async () => {
+    const p = redeemPairing(fakeHttp({ status: 409, body: { error: "Taken.", type: "other" } }), "https://k.example", "x", "L", "0.2.0");
+    await expect(p).rejects.toThrow("Taken. Change the device name and make a new code in the web app.");
+  });
+  test("a plugin too old, without a sentence, still doesn't blame the device name", async () => {
+    const p = redeemPairing(fakeHttp({ status: 409, body: { type: "plugin-too-old" } }), "https://k.example", "x", "L", "0.1.2");
+    await expect(p).rejects.not.toThrow("device name");
   });
 });

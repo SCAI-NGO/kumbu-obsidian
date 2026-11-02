@@ -3,7 +3,7 @@
 // Source: the API contract in kumbukumbu's docs/superpowers/plans/2026-10-26-obsidian-sync-server.md
 // and src/Kumbu.Server/Api/NoteApi.cs, FileApi.cs and SyncApi.cs. Paths are vault-tree paths ("/Work/plan.md").
 
-export interface ErrorView { error: string; }
+export interface ErrorView { error: string; code?: string; type?: string; }
 
 /** GET /api/vaults/{vault}/versions[?attachments=1][&since=] (ETag "<state>"; 304 for If-None-Match without since). */
 export interface VersionsView {
@@ -61,10 +61,10 @@ export interface MovedView { message: string; path: string | null; version: stri
 export interface WsTicketView { ticket: string; expiresAt: string; }
 
 /** GET /api/vaults. */
-export interface VaultView { name: string; notes: number; embeddings: string; pending: boolean; canWrite?: boolean; }
+export interface VaultView { name: string; notes: number; embeddings: string; pending: boolean; canWrite?: boolean; shared?: boolean; }
 
 /** POST /api/pairing/redeem (anonymous). */
-export interface RedeemRequest { code: string; device: string; }
+export interface RedeemRequest { code: string; device: string; plugin: string; }
 export interface RedeemView { key: string; vault: string; keyName: string; }
 
 /** WebSocket message, server → client. */

@@ -130,7 +130,7 @@ export default class KumbuSyncPlugin extends Plugin {
     }
     let paired;
     try {
-      paired = await redeemPairing(obsidianHttp, s.server, code, s.device);
+      paired = await redeemPairing(obsidianHttp, s.server, code, s.device, this.manifest.version);
     } catch (e) {
       new Notice(e instanceof Error ? e.message : "The server can't be reached.");
       return false;
@@ -182,7 +182,7 @@ export default class KumbuSyncPlugin extends Plugin {
   private async firstSync(engine: SyncEngine): Promise<void> {
     const s = this.data.settings;
     try {
-      await engine.firstSync((plan) => new ConflictChoiceModal(this.app, plan, s.vault, s.device).choose());
+      await engine.firstSync((plan) => new ConflictChoiceModal(this.app, plan, s.vault, engine.copyDevice).choose());
     } catch (e) {
       // Lost key: onAuthLost said so. Stopped (Disconnect, unload): nothing to say.
       if (e instanceof AuthError || this.engine !== engine) return;
