@@ -13,13 +13,13 @@ export function writerIdentity(label: string): string {
 
 export function conflictCopyText(
   local: string,
-  o: { device: string; localAt: Date; remoteWriter: string; remoteAt: Date; originalPath: string },
+  o: { device: string | null; localAt: Date; remoteWriter: string; remoteAt: Date; originalPath: string },
 ): string {
   const target = o.originalPath.replace(/\.md$/i, "");
   const title = target.slice(target.lastIndexOf("/") + 1);
   const callout = [
     "> [!warning] Kumbu² conflict",
-    `> Change from **${o.device}** at ${day(o.localAt)} ${time(o.localAt)}.`,
+    `> Change from **${o.device ?? "this device"}** at ${day(o.localAt)} ${time(o.localAt)}.`,
     `> The change from **${writerIdentity(o.remoteWriter)}** at ${time(o.remoteAt)} is in [[${target}|${title}]].`,
     "> Merge what you need, then delete this copy.",
     "",

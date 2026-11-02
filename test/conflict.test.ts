@@ -18,6 +18,12 @@ const callout = [
 test("the callout comes first in plain text", () => {
   expect(conflictCopyText("# Plan\nbody\n", o)).toBe(callout + "# Plan\nbody\n");
 });
+test("in a shared vault the callout says this device", () => {
+  const text = conflictCopyText("# Plan\n", { ...o, device: null });
+  expect(text).toContain("> Change from **this device** at 2026-10-27 10:15.");
+  expect(text).not.toContain("Laptop");
+  expect(text.endsWith("# Plan\n")).toBe(true);
+});
 test("the callout goes after frontmatter, which stays byte-identical", () => {
   const fm = "---\ntags: [a]\ntitle: x\n---\n";
   expect(conflictCopyText(fm + "body\n", o)).toBe(fm + callout + "body\n");

@@ -69,14 +69,15 @@ const pad = (n: number) => String(n).padStart(2, "0");
 
 /**
  * "projects/Plan.md" → "projects/Plan (conflict Laptop 2026-10-27 10-15).md", local time. An attachment keeps its
- * extension: "shot.png" → "shot (conflict Laptop 2026-10-27 10-15).png".
+ * extension: "shot.png" → "shot (conflict Laptop 2026-10-27 10-15).png". No device (a shared vault, or not knowing):
+ * "projects/Plan (conflict 2026-10-27 10-15).md".
  */
-export function conflictCopyPath(path: string, device: string, at: Date): string {
+export function conflictCopyPath(path: string, device: string | null, at: Date): string {
   const ext = extensionOf(path);
   const isNote = ext === "md";
   const stem = ext === "" ? path : path.slice(0, path.length - ext.length - 1);
   const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}-${pad(at.getMinutes())}`;
-  return `${stem} (conflict ${device} ${stamp})${isNote ? ".md" : ext === "" ? "" : path.slice(stem.length)}`;
+  return `${stem} (conflict ${device === null ? "" : `${device} `}${stamp})${isNote ? ".md" : ext === "" ? "" : path.slice(stem.length)}`;
 }
 
 export function slug(text: string): string {

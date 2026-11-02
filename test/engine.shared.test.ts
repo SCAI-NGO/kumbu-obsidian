@@ -347,3 +347,22 @@ describe("rejected meets a remote change", () => {
     expect(h.engine.status().notSynced).toEqual([]);
   });
 });
+
+describe("open conflict copies", () => {
+  test("copies with and without a device are recognised after a restart", async () => {
+    const h = await harness({ start: false, synced: {
+      "Plan (conflict 2026-10-27 10-15).md": "a",
+      "Plan (conflict 2026-10-27 10-15) 2.md": "b",
+      "Old (conflict Laptop 2026-10-27 10-15).md": "c",
+      "Not a copy (conflict) 2026-10-27 10-15.md": "d",
+    } });
+    h.files.binaries.set("shot (conflict 2026-10-27 10-15).png", png(1));
+    await h.engine.start();
+    expect(h.engine.status().conflicts).toEqual([
+      "Old (conflict Laptop 2026-10-27 10-15).md",
+      "Plan (conflict 2026-10-27 10-15) 2.md",
+      "Plan (conflict 2026-10-27 10-15).md",
+      "shot (conflict 2026-10-27 10-15).png",
+    ]);
+  });
+});

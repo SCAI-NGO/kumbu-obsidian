@@ -44,7 +44,7 @@ const MAX_ROUNDS = 4;
 const UNEXPECTED = "!";
 /** The version of an attachment too large to read: never equal to a real one, so it always differs from both sides. */
 const TOO_LARGE = "!too-large";
-const COPY_NAME = /\(conflict .+ \d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$/;
+const COPY_NAME = /\(conflict (?:.+ )?\d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$/;
 
 /**
  * Kumbu² lists the path with a version but doesn't hand its bytes over (they don't open, or the vault is locked): not a
