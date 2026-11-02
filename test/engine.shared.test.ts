@@ -523,3 +523,34 @@ describe("a change from my other device", () => {
     expect(h.files.files.get("plan (conflict Laptop 2026-10-27 10-15).md")).toContain("> The change from **Work – Obsidian Phone** at 10:15");
   });
 });
+
+test("the spec's worked example", async () => {
+  const sentence = "write: your role in vault Work is read, and a key never acts above your role; only the owner can change it";
+  const h = await harness({ synced: { "plan.md": "one", "other.md": "x" } });
+  h.server.listing = true;
+
+  // Bob reads only: his edit is refused, listed, and everything else goes on.
+  h.server.refuse = () => sentence;
+  h.files.userEdit("plan.md", "bob");
+  h.engine.localChanged("plan.md");
+  await settle(h, 2000);
+  expect(h.engine.status().notSynced).toEqual([{ path: "plan.md", reason: "rejected", detail: sentence }]);
+  expect(h.authLost).toBe(0);
+  await h.server.agentWrite("other.md", "y");
+  await h.engine.check(false);
+  expect(h.files.files.get("other.md")).toBe("y");
+
+  // Alice raises him to write, and they edit plan.md at once.
+  h.server.refuse = null;
+  await h.server.agentWrite("plan.md", "alice");
+  h.files.userEdit("plan.md", "bob again");
+  h.engine.localChanged("plan.md");
+  await settle(h, 2000);
+  const copy = "plan (conflict 2026-10-27 10-15).md";
+  expect(h.files.files.get("plan.md")).toBe("alice");
+  expect(h.files.files.get(copy)).toContain("Change from **this device**");
+  expect(h.files.files.get(copy)).toContain("bob again");
+  expect(h.files.files.get(copy)).not.toContain("Laptop");
+  expect(h.server.notes.get(copy)!.content).toBe(h.files.files.get(copy));
+  expect(h.engine.status().notSynced).toEqual([]);
+});

@@ -12,7 +12,7 @@ The design is in the server repository: [`docs/superpowers/specs/2026-10-26-obsi
 
 ## Network use
 
-The plugin talks only to the Kumbu² server you enter. It uses HTTPS (plain HTTP only for `localhost` and `127.0.0.1`), for REST calls and for one WebSocket that tells it when the vault changed. It sends the paths and text of every `.md` note outside dot folders, the paths and bytes of the PDFs and images it syncs (see below), the paths of the folders kept empty, and the device name when pairing (it becomes the key's name in Kumbu², and conflict copies carry it). Nothing else: no other files, no settings, no telemetry.
+The plugin talks only to the Kumbu² server you enter. It uses HTTPS (plain HTTP only for `localhost` and `127.0.0.1`), for REST calls and for one WebSocket that tells it when the vault changed. It sends the paths and text of every `.md` note outside dot folders, the paths and bytes of the PDFs and images it syncs (see below), the paths of the folders kept empty, and the device name and the plugin's version when pairing (the device name becomes the key's name in Kumbu², and conflict copies outside shared vaults carry it). Nothing else: no other files, no settings, no telemetry.
 
 ## Installation
 
@@ -40,6 +40,8 @@ Empty folders made while the plugin isn't running or the server can't be reached
 **Files too large:** a note over 1 MiB, or a PDF or image over 15 MB, is not synced, and Obsidian shows a notice once for each such file, naming it and what to do. When several turn up in one sync (a first sync, say), one notice gives their number and points to the settings' list. An image can be uploaded in the Kumbu² web app, which can make it smaller; the plugin doesn't change your files. While a file is too large, the plugin doesn't read it and nothing from Kumbu² replaces or trashes it, the web app's smaller copy under the same name included. The notice comes again only if the file shrank below the limit (or was deleted) and later grew too large again. Other files Kumbu² doesn't keep get no notice; they are only in the settings' list.
 
 **Conflict copies:** if a note changed in Kumbu² while you were editing it, the note gets the Kumbu² text and your text goes to `<name> (conflict <device> YYYY-MM-DD HH-mm).md` next to it. The copy starts (after any frontmatter) with a callout naming both changes and linking to the original. Merge what you need into the original, then delete the copy. A PDF or image changed on both sides works the same way: the file gets Kumbu²'s version and yours goes, unchanged, to a copy with the same extension, such as `shot (conflict Laptop 2026-10-27 22-15).png`. The settings list the open conflict copies.
+
+**Shared vaults** need this plugin at 0.2.0 or newer, and a Kumbu² server at 0.3.0 or newer. A change the server refuses, in a vault you may only read for example, is listed as not synced with the server's sentence, and everything else keeps syncing; if the note then changes in Kumbu², your text goes to a conflict copy. A conflict copy reaches every member, so there it doesn't name your device, or the other writer: `<name> (conflict YYYY-MM-DD HH-mm).md`. When the plugin can't tell whether a vault is shared, it treats it as shared.
 
 **The status bar** shows `Kumbu² ● live` while the WebSocket is connected, `● polling` while it isn't (the plugin then checks every 2 minutes) and `○ offline` while the server can't be reached. It adds `· 3 not synced` when files are left out. A click opens the settings. The command **Sync now** checks at once.
 
