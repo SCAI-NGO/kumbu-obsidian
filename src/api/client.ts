@@ -204,8 +204,8 @@ export class KumbuApi implements RemoteApi {
 
 const RETRY_SAME_CODE = "Try again in a moment with the same code.";
 
-export async function redeemPairing(http: HttpFn, server: string, code: string, device: string): Promise<RedeemView> {
-  const body: RedeemRequest = { code: normalisePairingCode(code), device: device.trim() };
+export async function redeemPairing(http: HttpFn, server: string, code: string, device: string, plugin: string): Promise<RedeemView> {
+  const body: RedeemRequest = { code: normalisePairingCode(code), device: device.trim(), plugin };
   let r: HttpResponse;
   try {
     r = await call(http, { method: "POST", url: `${trimServer(server)}/api/pairing/redeem`, headers: {} }, body);
@@ -218,6 +218,8 @@ export async function redeemPairing(http: HttpFn, server: string, code: string, 
     throw new OfflineError(`${errorOf(r) ?? `The server answered ${r.status}.`} ${RETRY_SAME_CODE}`, retryAfterMs(r));
   }
   if (r.status === 409) {
+    // The code still works and the device name has nothing to do with it.
+    if (errorField(r, "type") === "plugin-too-old") throw new RejectedError(errorOf(r) ?? "Update the Kumbu² plugin to sync this shared vault.", 409);
     // Every "<Vault> – Obsidian <device>" name up to " 20" is taken, and the code is used up.
     throw new RejectedError(`${errorOf(r) ?? "That key name is taken."} Change the device name and make a new code in the web app.`, 409);
   }
@@ -291,4 +293,9 @@ function tryParse<T>(r: HttpResponse): T | null {
 function errorOf(r: HttpResponse): string | null {
   const view = tryParse<Partial<ErrorView>>(r);
   return typeof view?.error === "string" && view.error ? view.error : null;
+}
+
+function errorField(r: HttpResponse, field: "code" | "type"): string | null {
+  const value = tryParse<Partial<ErrorView>>(r)?.[field];
+  return typeof value === "string" && value ? value : null;
 }

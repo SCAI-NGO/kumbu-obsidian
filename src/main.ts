@@ -130,7 +130,7 @@ export default class KumbuSyncPlugin extends Plugin {
     }
     let paired;
     try {
-      paired = await redeemPairing(obsidianHttp, s.server, code, s.device);
+      paired = await redeemPairing(obsidianHttp, s.server, code, s.device, this.manifest.version);
     } catch (e) {
       new Notice(e instanceof Error ? e.message : "The server can't be reached.");
       return false;
