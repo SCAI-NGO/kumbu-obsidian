@@ -159,6 +159,6 @@ Reviewers flagged these, and the final review triaged them as fine to leave:
 
 ## Pull request
 
-PR_LINK
+Draft pull request: https://github.com/SCAI-NGO/kumbu-obsidian/pull/8, from `feature/plugin-0.2.0` to `master`. Not merged.
 
-CI on the pull request: CI_STATUS
+CI: the `check` job passed on the push runs for `37d4012` (runs 41476713834 and 41476713910), each in about 25 s. The pull request's own run for this report commit is on the PR page.
