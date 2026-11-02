@@ -177,6 +177,47 @@ describe("errors", () => {
   });
 });
 
+describe("refusals", () => {
+  const writes: [string, (c: KumbuApi) => Promise<unknown>][] = [
+    ["put, creating", (c) => c.put("a.md", "x", null)],
+    ["put, over a version", (c) => c.put("a.md", "x", "bbbbbbbbbbbb")],
+    ["remove", (c) => c.remove("a.md", "bbbbbbbbbbbb")],
+    ["move", (c) => c.move("a.md", "b.md")],
+    ["putFile, creating", (c) => c.putFile("a.png", new ArrayBuffer(1), null)],
+    ["putFile, over a version", (c) => c.putFile("a.png", new ArrayBuffer(1), "bbbbbbbbbbbb")],
+    ["removeFile", (c) => c.removeFile("a.png", "bbbbbbbbbbbb")],
+  ];
+  const SENTENCE = "write: this key can only read vault Work";
+
+  test.each(writes)("%s: a 403 with a code is rejected with the server's sentence", async (_, write) => {
+    const e = await write(api(fakeHttp({ status: 403, body: { error: SENTENCE, code: "read-only" } }))).catch((x: unknown) => x) as RejectedError;
+    expect(e).toBeInstanceOf(RejectedError);
+    expect(e.message).toBe(SENTENCE);
+    expect(e.status).toBe(403);
+  });
+  test.each(writes)("%s: a 403 without a code means the key is lost", async (_, write) => {
+    await expect(write(api(fakeHttp({ status: 403, body: { error: "No." } })))).rejects.toBeInstanceOf(AuthError);
+  });
+  test.each(["read-only", "structural", "closing", "owner-inactive", "a-code-from-a-newer-server"])("the code %s is a refusal", async (code) => {
+    await expect(api(fakeHttp({ status: 403, body: { error: SENTENCE, code } })).put("a.md", "x", null)).rejects.toBeInstanceOf(RejectedError);
+  });
+  test.each([[""], [7], [null]])("a code that is no code (%j) isn't a refusal", async (code) => {
+    await expect(api(fakeHttp({ status: 403, body: { error: SENTENCE, code } })).put("a.md", "x", null)).rejects.toBeInstanceOf(AuthError);
+  });
+  test("a 403 with a code and no sentence still has one", async () => {
+    const e = await api(fakeHttp({ status: 403, body: { code: "read-only" } })).put("a.md", "x", null).catch((x: unknown) => x) as RejectedError;
+    expect(e).toBeInstanceOf(RejectedError);
+    expect(e.message).not.toBe("");
+  });
+  test("a 401 with a code stays a lost key", async () => {
+    await expect(api(fakeHttp({ status: 401, body: { error: "No.", code: "read-only" } })).put("a.md", "x", null)).rejects.toBeInstanceOf(AuthError);
+  });
+  test("revoking this key takes any 403 as revoked, with a code or without", async () => {
+    await api(fakeHttp({ status: 403, body: { error: "No." } })).revokeSelf();
+    await api(fakeHttp({ status: 403, body: { error: SENTENCE, code: "read-only" } })).revokeSelf();
+  });
+});
+
 describe("tickets and vaults", () => {
   test("wsTicket posts with the key", async () => {
     const http = fakeHttp({ status: 200, body: { ticket: "kumbu_wst_x", expiresAt: "2026-10-27T10:00:30Z" } });

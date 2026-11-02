@@ -252,6 +252,8 @@ async function call(http: HttpFn, request: HttpRequest, body?: unknown): Promise
 function expectOk(r: HttpResponse): void {
   if (r.status >= 200 && r.status < 300) return;
   const sentence = errorOf(r);
+  // A refusal in a shared vault is no revoked key, and an unknown code counts too, so that a newer server doesn't stop an older plugin's sync.
+  if (r.status === 403 && errorField(r, "code") !== null) throw new RejectedError(sentence ?? "The server refused this change.", 403);
   if (r.status === 401 || r.status === 403) throw new AuthError(sentence ?? "This key expired or was revoked.");
   if (r.status === 503 || r.status === 429 || r.status >= 500 || r.status === 408) {
     throw new OfflineError(sentence ?? `The server answered ${r.status}.`, retryAfterMs(r));

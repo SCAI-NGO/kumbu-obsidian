@@ -20,9 +20,12 @@ export interface RemoteFile { bytes: ArrayBuffer; version: Version; }
 export type FilePutResult = { ok: true; version: Version } | { ok: false; conflict: { version: Version } };
 export type FileDeleteResult = { ok: true } | { ok: false; conflict: { version: Version } | null }; // null: already gone
 
-/** 401: the key expired or was revoked. */
+/** 401, or a 403 without a refusal's code: the key expired or was revoked. */
 export class AuthError extends Error {}
-/** 400/413 (and pairing's 404/409/429): the server's sentence is the message. */
+/**
+ * 400/413 (and pairing's 404/409/429): the server's sentence is the message.
+ * status 403: a refusal, a 403 with a code (read-only, structural, closing, owner-inactive, or one newer than this plugin).
+ */
 export class RejectedError extends Error {
   constructor(message: string, readonly status: number | null = null) { super(message); }
 }
