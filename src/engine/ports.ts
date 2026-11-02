@@ -34,7 +34,7 @@ export class OfflineError extends Error {
   constructor(message: string, readonly retryAfterMs: number | null = null) { super(message); }
 }
 
-export interface ListedVault { name: string; canWrite: boolean; shared?: boolean; }
+export interface ListedVault { name: string; canWrite: boolean; shared?: boolean; level?: string; }
 
 export interface RemoteApi {
   versions(since: string | null, state: string | null): Promise<VersionsAnswer>;

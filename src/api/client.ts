@@ -171,7 +171,7 @@ export class KumbuApi implements RemoteApi {
   async vaults(): Promise<ListedVault[]> {
     const r = await this.send("GET", "/api/vaults");
     expectOk(r);
-    return parse<VaultView[]>(r).map((v) => ({ name: v.name, canWrite: v.canWrite === true, shared: v.shared }));
+    return parse<VaultView[]>(r).map((v) => ({ name: v.name, canWrite: v.canWrite === true, shared: v.shared, level: v.level }));
   }
 
   /** The current note of a 409: from its body, or read when the body has none. */

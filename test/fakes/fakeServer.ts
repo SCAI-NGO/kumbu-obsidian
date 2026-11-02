@@ -40,6 +40,8 @@ export class FakeServer implements RemoteApi {
   refuse: ((path: string) => string | null) | null = null;
   /** What GET /api/vaults says of Work: `shared`, "unlisted", "absent" (a server from before sharing), or it fails. */
   listing: boolean | "unlisted" | "absent" | Error = false;
+  /** The level GET /api/vaults gives for Work, if any. */
+  level: string | undefined = undefined;
   vaultsAsked = 0;
   private readonly holds = new Map<Method, Promise<void>[]>();
   private readonly failures = new Map<Method, Error[]>();
@@ -216,7 +218,7 @@ export class FakeServer implements RemoteApi {
     if (this.listing instanceof Error) return Promise.reject(this.listing);
     if (this.listing === "unlisted") return Promise.resolve([{ name: "Other", canWrite: true, shared: false }]);
     if (this.listing === "absent") return Promise.resolve([{ name: "Work", canWrite: true }]);
-    return Promise.resolve([{ name: "Work", canWrite: true, shared: this.listing }]);
+    return Promise.resolve([{ name: "Work", canWrite: true, shared: this.listing, level: this.level }]);
   }
 
   private refuseMarker(path: string): void {

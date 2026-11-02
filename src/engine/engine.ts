@@ -42,6 +42,8 @@ const RETRY_MAX_MS = 5 * 60_000;
 const MAX_ROUNDS = 4;
 /** Marks a path listed for an unexpected error: never equal to a version, so it is tried again every time. */
 const UNEXPECTED = "!";
+/** How often a change the server refused is tried again while one is listed: nothing tells the plugin of a new role. */
+export const REFUSED_RETRY_MS = 15 * 60_000;
 /** The version of an attachment too large to read: never equal to a real one, so it always differs from both sides. */
 const TOO_LARGE = "!too-large";
 const COPY_NAME = /\(conflict (?:.+ )?\d{4}-\d{2}-\d{2} \d{2}-\d{2}\)( \d+)?\.[^./]+$/;
@@ -82,7 +84,12 @@ export class SyncEngine {
   private readonly localPathOf = new Map<string, string>();
   private readonly attachments = new Set<string>();
   private readonly tooLarge = new Set<string>();
-  private readonly rejected = new Map<string, { version: Version; detail: string }>();
+  /** `refused`: a 403 with a code, which rights can undo, unlike a file the server won't take at all. */
+  private readonly rejected = new Map<string, { version: Version; detail: string; refused?: boolean }>();
+  /** The vault's level as last listed, and as the last check saw it: a change makes the refused changes go again. */
+  private rights: string | null = null;
+  private checkedRights: string | null = null;
+  private refusedRetry: unknown = null;
   /** An older server answered a marker with a 400: none is sent again until the next start. */
   private markersRefused = false;
   private caseClashes = new Map<string, string>();
@@ -130,6 +137,7 @@ export class SyncEngine {
     for (const h of this.folderWaits.values()) this.o.clock.clearTimeout(h);
     this.folderWaits.clear();
     this.cancelRetry();
+    this.armRefusedRetry();
     await this.queue.idle();
   }
 
@@ -156,6 +164,7 @@ export class SyncEngine {
     try {
       const listed = (await this.o.remote.vaults()).find((v) => v.name === this.o.vault);
       shared = listed?.shared !== false;
+      if (listed) this.rights = listed.level ?? (listed.canWrite ? "write" : "read");
     } catch {
       shared = true;
     }
@@ -343,10 +352,35 @@ export class SyncEngine {
       } catch (e) {
         this.failed(e);
       } finally {
+        this.armRefusedRetry();
         this.emit();
       }
     }, key);
     return p;
+  }
+
+  /** Refused changes become ordinary dirty paths again: the next check sends them, and a conflict keeps both texts. */
+  private retryRefused(): void {
+    for (const [key, entry] of this.rejected) {
+      if (!entry.refused) continue;
+      this.rejected.delete(key);
+      this.dirty.add(key);
+    }
+  }
+
+  /** A timer only while something refused is listed, so that a vault without refusals asks nothing more of the server. */
+  private armRefusedRetry(): void {
+    const waiting = !this.stopped && [...this.rejected.values()].some((r) => r.refused);
+    if (!waiting) {
+      if (this.refusedRetry !== null) this.o.clock.clearTimeout(this.refusedRetry);
+      this.refusedRetry = null;
+    } else if (this.refusedRetry === null) {
+      this.refusedRetry = this.o.clock.setTimeout(() => {
+        this.refusedRetry = null;
+        this.retryRefused();
+        void this.check(false);
+      }, REFUSED_RETRY_MS);
+    }
   }
 
   private enqueuePath(key: string): Promise<void> {
@@ -362,6 +396,8 @@ export class SyncEngine {
   private async runCheck(full: boolean): Promise<void> {
     const answer = await this.o.remote.versions(full ? null : this.state.cursor, null);
     await this.readShared();
+    if (this.checkedRights !== null && this.rights !== this.checkedRights) this.retryRefused();
+    this.checkedRights = this.rights;
     const { remote, keys } = await this.resolve(answer);
     const damagedPossible = answer.full && answer.damaged > 0;
     let pathFailed = false;
@@ -569,7 +605,7 @@ export class SyncEngine {
       again = await this.upload(key, content, remote);
     } catch (e) {
       if (!(e instanceof RejectedError)) throw e;
-      this.rejected.set(key, { version: local, detail: e.message });
+      this.rejected.set(key, { version: local, detail: e.message, refused: e.status === 403 });
       return false;
     }
     // The server changed since the list: decided as usual, which keeps both texts.
@@ -645,7 +681,8 @@ export class SyncEngine {
       if (local === null) this.tooLarge.delete(key);
       const base = this.state.bases[key] ?? null;
       const action = decide({ local, remote, base, remoteDamagedPossible: damagedPossible });
-      // A change of this device's the server refused is not sent again until the file changes again.
+      // A change of this device's the server refused is not sent again until the file changes again, the rights change
+      // (retryRefused) or the retry's timer comes round.
       const outgoing = action.kind === "upload" || action.kind === "reupload" || action.kind === "deleteRemote";
       if (outgoing && this.rejected.get(key)?.version === (local ?? "")) return;
       let again: Again | undefined;
@@ -671,7 +708,7 @@ export class SyncEngine {
           this.dirty.delete(key);
           return;
         }
-        this.rejected.set(key, { version: local ?? "", detail: e.message });
+        this.rejected.set(key, { version: local ?? "", detail: e.message, refused: e.status === 403 });
         this.dirty.delete(key);
         return;
       }
