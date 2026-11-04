@@ -3,7 +3,7 @@
   "name": "Kumbu² Sync",
   "version": "0.3.0",
   "minAppVersion": "1.11.4",
-  "description": "Sync this vault with a Kumbu2 vault on your own server.",
+  "description": "Sync this vault with a Kumbu² vault on your own server.",
   "author": "SCAI-NGO",
   "isDesktopOnly": false
 }
