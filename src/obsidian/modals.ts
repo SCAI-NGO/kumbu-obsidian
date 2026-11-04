@@ -3,7 +3,7 @@
 import { Modal, Setting, type App } from "obsidian";
 import type { Choice, FirstSyncSummary, MergePlan } from "../engine/firstSync";
 import { conflictCopyPath } from "../engine/paths";
-import { choiceIntro, differTitle, notSyncedNote, notSyncedSummary, resultHeadline } from "./texts";
+import { choiceIntro, differTitle, notSyncedNote, notSyncedSummary, resultHeadline, showDiffering } from "./texts";
 
 /** Asks once for all differing notes (spec §6). Closing it without Continue cancels the first sync. */
 export class ConflictChoiceModal extends Modal {
@@ -46,7 +46,7 @@ export class ConflictChoiceModal extends Modal {
       text.createDiv({ cls: "kumbu-sync-option-desc", text: desc });
     }
     new Setting(contentEl)
-      .addButton((b) => b.setButtonText(`Show the ${n} notes`).onClick(() => {
+      .addButton((b) => b.setButtonText(showDiffering(n)).onClick(() => {
         new NotesListModal(this.app, differTitle(n, this.vault), this.plan.differing).open();
       }))
       .addButton((b) => b.setButtonText("Continue").setCta().onClick(() => this.finish(this.choice)));

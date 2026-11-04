@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, test } from "vitest";
 import type { NotSynced, SyncStatus } from "../src/engine/ports";
-import { choiceIntro, differTitle, notSyncedSummary, resultHeadline, statusText } from "../src/obsidian/texts";
+import { choiceIntro, differTitle, notSyncedSummary, resultHeadline, showDiffering, statusText } from "../src/obsidian/texts";
 
 const status = (o: Partial<SyncStatus>): SyncStatus => ({ mode: "live", notSynced: [], conflicts: [], busy: false, lastSyncAt: null, ...o });
 const att = (path: string): NotSynced => ({ path, reason: "attachment" });
@@ -20,7 +20,11 @@ test("differ title", () => {
 });
 test("choice intro", () => {
   expect(choiceIntro(12, 7)).toBe("Same path on both sides, different text. Everything else merges by itself (12 notes). Choose once for all 7:");
-  expect(choiceIntro(1, 1)).toBe("Same path on both sides, different text. Everything else merges by itself (1 note). Choose once for all 1:");
+  expect(choiceIntro(1, 1)).toBe("Same path on both sides, different text. Everything else merges by itself (1 note). Choose what to keep:");
+});
+test("show differing", () => {
+  expect(showDiffering(7)).toBe("Show the 7 notes");
+  expect(showDiffering(1)).toBe("Show the note");
 });
 test("not synced summary groups attachments by kind", () => {
   expect(notSyncedSummary([att("a.png"), att("b.jpg"), att("c.pdf")])).toBe("2 images, 1 PDF");
