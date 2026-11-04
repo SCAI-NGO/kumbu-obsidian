@@ -17,7 +17,11 @@ export function differTitle(n: number, vault: string): string {
 }
 
 export function choiceIntro(merging: number, differing: number): string {
-  return `Same path on both sides, different text. Everything else merges by itself (${count(merging, "note", "notes")}). Choose once for all ${differing}:`;
+  return `Same path on both sides, different text. Everything else merges by itself (${count(merging, "note", "notes")}). ${differing === 1 ? "Choose what to keep:" : `Choose once for all ${differing}:`}`;
+}
+
+export function showDiffering(n: number): string {
+  return n === 1 ? "Show the note" : `Show the ${n} notes`;
 }
 
 export function resultHeadline(conflictCopies: number): string {

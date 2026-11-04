@@ -7,7 +7,7 @@ The design is in the server repository: [`docs/superpowers/specs/2026-10-26-obsi
 ## Prerequisites
 
 - Obsidian 1.11.4 or newer, on desktop or mobile
-- A Kumbu² server and an account on it
+- An account on a Kumbu² server: the plugin does nothing without one. Kumbu² is free software that you or someone you trust runs; there is no service to pay for
 - A vault there that you can write to. The plugin never creates a vault: it syncs exactly the one you connect it to
 
 ## Network use
@@ -16,10 +16,9 @@ The plugin talks only to the Kumbu² server you enter. It uses HTTPS (plain HTTP
 
 ## Installation
 
-1. Install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from Obsidian's community plugins.
-2. In BRAT, "Add beta plugin" with `SCAI-NGO/kumbu-obsidian`, and enable **Kumbu² Sync**.
-3. In the Kumbu² web app, open the vault's menu and choose **Connect Obsidian**. It shows a pairing code.
-4. In Obsidian, open the settings of Kumbu² Sync, enter the server address and the code, and connect.
+1. In Obsidian's settings, under **Community plugins**, browse for **Kumbu² Sync**, install it and enable it. While it isn't listed there yet, install [BRAT](https://github.com/TfTHacker/obsidian42-brat) and use its "Add beta plugin" with `SCAI-NGO/kumbu-obsidian`.
+2. In the Kumbu² web app, open the vault's menu and choose **Connect Obsidian**. It shows a pairing code.
+3. In Obsidian, open the settings of Kumbu² Sync, enter the server address and the code, and connect.
 
 If the vault already has notes, the first sync merges both sides. Notes that exist on one side only are copied over, and notes that are the same are left alone. If some paths have different text on each side, the plugin asks once what to do with all of them. **Keep both** (the default) keeps Kumbu²'s version and puts your local text in a conflict copy next to it. **Keep local** replaces the Kumbu² version, which stays in Kumbu²'s history. **Keep Kumbu²** replaces your text, which goes to Obsidian's trash first.
 
@@ -66,7 +65,7 @@ To try it in Obsidian, link the repository into a test vault: `ln -s "$PWD" <vau
 
 The sync engine (`src/engine/`), the API client (`src/api/`) and the live hints (`src/live/`) are plain TypeScript without Obsidian. Lint enforces that, and the tests and `pnpm e2e` run them in Node. Only `src/obsidian/` and `src/main.ts` use Obsidian's API.
 
-**Releasing:** bump the version in `manifest.json`, `package.json` and `versions.json` (the new version → its `minAppVersion`), commit, and push a tag `x.y.z` without a `v`. The release workflow checks that the tag matches `manifest.json`, runs lint, the tests and the build, and creates the GitHub release with `main.js`, `manifest.json` and `styles.css`. BRAT installs from that release.
+**Releasing:** bump the version in `manifest.json`, `package.json` and `versions.json` (the new version → its `minAppVersion`), commit, and push a tag `x.y.z` without a `v`. The release workflow checks that the tag matches `manifest.json`, runs lint, the tests and the build, and creates the GitHub release with `main.js`, `manifest.json` and `styles.css`. Obsidian and BRAT install from that release.
 
 ## Licence
 
