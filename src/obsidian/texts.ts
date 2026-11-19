@@ -40,7 +40,7 @@ export function notSyncedSummary(list: NotSynced[]): string {
       if (IMAGES.has(ext)) images++;
       else if (ext === "pdf") pdfs++;
       else others++;
-    } else if (n.reason === "too-large") tooLarge++;
+    } else if (n.reason === "too-large" || n.reason === "too-large-in-kumbu") tooLarge++;
     else if (n.reason === "rejected") rejected++;
     else if (n.reason === "case-clash") clashes++;
   }
@@ -57,7 +57,7 @@ export function notSyncedSummary(list: NotSynced[]): string {
 /** What the first sync's summary adds after the counts: why the files Kumbu² doesn't keep stayed behind. */
 export function notSyncedNote(list: NotSynced[]): string {
   if (list.some((n) => n.reason === "attachment")) return " (this Kumbu² server keeps notes only)";
-  if (list.some((n) => n.reason === "unsupported")) return " (Kumbu² keeps notes, PDFs and images only)";
+  if (list.some((n) => n.reason === "unsupported")) return " (this plugin syncs notes, PDFs and images only)";
   return "";
 }
 
@@ -65,8 +65,9 @@ export function notSyncedNote(list: NotSynced[]): string {
 export function reasonText(n: NotSynced): string {
   switch (n.reason) {
     case "attachment": return "This Kumbu² server keeps notes only.";
-    case "unsupported": return "Kumbu² keeps notes, PDFs and images only.";
+    case "unsupported": return "This plugin syncs notes, PDFs and images only.";
     case "too-large": return tooLargeText(n.path);
+    case "too-large-in-kumbu": return "Larger than 15 MB in Kumbu², so it isn't downloaded. It stays in Kumbu², where the web app can download it.";
     case "rejected": return n.detail ?? "Refused by the server.";
     case "case-clash": return n.detail ?? "Differs only in case from another note.";
     case "damaged-vault": return n.detail ?? "Some notes in Kumbu² can't be opened.";

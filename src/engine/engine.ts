@@ -84,6 +84,10 @@ export class SyncEngine {
   private readonly localPathOf = new Map<string, string>();
   private readonly attachments = new Set<string>();
   private readonly tooLarge = new Set<string>();
+  /** Attachments over MAX_ATTACHMENT_BYTES in Kumbu², by the size the versions list gave (a 0.6.0 server keeps up to 1 GiB). */
+  private readonly tooLargeThere = new Set<string>();
+  /** Each attachment's size as last listed; an older server lists none. */
+  private readonly remoteSizes = new Map<string, number>();
   /** `refused`: a 403 with a code, which rights can undo, unlike a file the server won't take at all. */
   private readonly rejected = new Map<string, { version: Version; detail: string; refused?: boolean }>();
   /** The vault's level as last listed, and as the last check saw it: a change makes the refused changes go again. */
@@ -183,6 +187,7 @@ export class SyncEngine {
     const other = this.supportsAttachments ? "unsupported" : "attachment";
     for (const path of [...this.attachments].sort()) notSynced.push({ path, reason: other });
     for (const path of [...this.tooLarge].sort()) notSynced.push({ path, reason: "too-large" });
+    for (const path of [...this.tooLargeThere].sort()) notSynced.push({ path, reason: "too-large-in-kumbu" });
     for (const [path, r] of [...this.rejected].sort()) notSynced.push({ path, reason: "rejected", detail: r.detail });
     for (const [path, winner] of [...this.caseClashes].sort()) {
       notSynced.push({ path, reason: "case-clash", detail: `Differs only in case from ${winner}.` });
@@ -451,8 +456,13 @@ export class SyncEngine {
     const kinds = new Set([undefined, "note", ...(answer.attachments ? ["image", "pdf", "folder"] : [])]);
     const entries = answer.entries
       .filter((e) => kinds.has(e.kind))
-      .map((e) => ({ key: keyOf(e.path), version: e.version }))
+      .map((e) => ({ key: keyOf(e.path), version: e.version, size: e.size }))
       .sort((a, b) => cmp(a.key, b.key));
+    if (isFull) this.remoteSizes.clear();
+    for (const { key, version, size } of entries) {
+      if (version !== null && size !== undefined) this.remoteSizes.set(key, size);
+      else this.remoteSizes.delete(key);
+    }
     for (const { key, version } of entries) {
       const winner = owner.get(fold(key));
       if (caseInsensitive && winner !== undefined && winner !== key) {
@@ -538,6 +548,7 @@ export class SyncEngine {
     for (const key of keys) {
       // A marker is never shown, nor asked about (both sides' is the same): the normal decision below syncs it.
       if (this.state.bases[key] !== undefined || isMarker(key)) continue;
+      if (this.tooLargeInKumbu(key, remote.get(key) ?? null)) continue;
       const local = await this.localVersion(key, this.localPathOf.get(key) ?? key);
       // Stays as it is whatever the choice, so it is no part of the question: syncPath lists it.
       if (local === TOO_LARGE) {
@@ -662,6 +673,10 @@ export class SyncEngine {
       this.dirty.delete(key);
       return;
     }
+    if (this.tooLargeInKumbu(key, remote)) {
+      this.dirty.delete(key);
+      return;
+    }
     for (let round = 0; round < MAX_ROUNDS; round++) {
       if (this.stopped) return;
       const path = this.localPathOf.get(key) ?? key;
@@ -732,6 +747,21 @@ export class SyncEngine {
     const size = stat === undefined ? await this.o.local.size(path) : (stat?.size ?? null);
     if (size === null || size <= MAX_ATTACHMENT_BYTES) return false;
     this.tooLarge.add(key);
+    return true;
+  }
+
+  /**
+   * An attachment over its limit in Kumbu² is never downloaded (requestUrl holds a whole answer in memory, and a 0.6.0
+   * server keeps files up to 1 GiB), and the local file of that name is neither replaced nor sent over it: both stay
+   * as they are, listed, until it is smaller there or gone. Known only from a server that lists sizes.
+   */
+  private tooLargeInKumbu(key: string, remote: Version | null): boolean {
+    const size = remote === null || attachmentKind(key) === null ? undefined : this.remoteSizes.get(key);
+    if (size === undefined || size <= MAX_ATTACHMENT_BYTES) {
+      this.tooLargeThere.delete(key);
+      return false;
+    }
+    this.tooLargeThere.add(key);
     return true;
   }
 
@@ -968,6 +998,7 @@ export class SyncEngine {
   private forgetProblems(key: string): void {
     this.rejected.delete(key);
     this.tooLarge.delete(key);
+    this.tooLargeThere.delete(key);
   }
 
   private async setBase(key: string, version: Version): Promise<void> {

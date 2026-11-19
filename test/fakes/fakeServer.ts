@@ -43,6 +43,8 @@ export class FakeServer implements RemoteApi {
   /** The level GET /api/vaults gives for Work, if any. */
   level: string | undefined = undefined;
   vaultsAsked = 0;
+  /** Whether the versions list names each attachment's size, as a server from 0.6.0 on does. */
+  sizes = true;
   private readonly holds = new Map<Method, Promise<void>[]>();
   private readonly failures = new Map<Method, Error[]>();
   private readonly dropped = new Set<Method>();
@@ -117,7 +119,11 @@ export class FakeServer implements RemoteApi {
     const sinceAt = since === null ? NaN : Date.parse(since);
     const attachments = this.attachmentsSupported;
     // As the server: with attachments, every entry has its kind; without, attachments are nowhere in the answer.
-    const entry = (path: string, version: Version, kind: FileKind): RemoteEntry => (attachments ? { path, version, kind } : { path, version });
+    // A 0.6.0 server also names each attachment's size; `sizes = false` plays an older one.
+    const entry = (path: string, version: Version, kind: FileKind): RemoteEntry => {
+      const size = kind === "note" || !this.sizes ? undefined : this.files.get(path)?.bytes.byteLength;
+      return attachments ? { path, version, kind, ...(size === undefined ? {} : { size }) } : { path, version };
+    };
     const files = attachments ? this.files : new Map<string, StoredFile>();
     if (Number.isNaN(sinceAt)) {
       const entries: RemoteEntry[] = [
@@ -263,11 +269,13 @@ export class FakeServer implements RemoteApi {
   }
 }
 
+/** As a 0.6.0 server: `.md` (exactly) is a note, the known formats keep their kind, anything else is a `file`. */
 function kindOf(path: string): FileKind {
   if (isMarker(path)) return "folder";
+  if (path.endsWith(".md")) return "note";
   const lower = path.toLowerCase();
   if (lower.endsWith(".pdf")) return "pdf";
-  return lower.endsWith(".md") ? "note" : "image";
+  return /\.(png|jpe?g|gif|webp|svg)$/.test(lower) ? "image" : ("file" as FileKind);
 }
 
 function mediaTypeOf(path: string): string {
