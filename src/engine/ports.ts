@@ -4,7 +4,8 @@
 export type Version = string; // 12 hex chars
 /** What a path holds on a server with attachments; a server without them gives no kind. "folder": a folder marker. */
 export type FileKind = "note" | "image" | "pdf" | "folder";
-export interface RemoteEntry { path: string; version: Version | null; kind?: FileKind; } // vault-relative path; null = deleted
+/** `size`: an attachment's bytes, from a server at 0.6.0 or newer, which keeps files larger than the plugin reads. */
+export interface RemoteEntry { path: string; version: Version | null; kind?: FileKind; size?: number; } // vault-relative path; null = deleted
 export interface VersionsAnswer {
   full: boolean; entries: RemoteEntry[]; cursor: string; state: string | null; damaged: number; unchanged: boolean;
   /** The server keeps attachments: it lists them, and serves them through readFile, putFile and removeFile. */
@@ -115,9 +116,10 @@ export interface Clock { now(): number; setTimeout(fn: () => void, ms: number): 
 
 /**
  * "attachment": a file other than a note on a server without attachments (today's list); "unsupported": a format
- * Kumbu² doesn't keep, on a server that keeps PDFs and images.
+ * this plugin doesn't sync, on a server that keeps PDFs and images; "too-large-in-kumbu": a PDF or image over the
+ * plugin's limit in Kumbu², which it doesn't download.
  */
-export type NotSyncedReason = "attachment" | "unsupported" | "too-large" | "rejected" | "case-clash" | "damaged-vault";
+export type NotSyncedReason = "attachment" | "unsupported" | "too-large" | "too-large-in-kumbu" | "rejected" | "case-clash" | "damaged-vault";
 export interface NotSynced { path: string; reason: NotSyncedReason; detail?: string; }
 export type ConnectionMode = "live" | "polling" | "offline";
 export interface SyncStatus { mode: ConnectionMode; notSynced: NotSynced[]; conflicts: string[]; busy: boolean; lastSyncAt: string | null; }

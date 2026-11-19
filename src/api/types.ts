@@ -18,7 +18,8 @@ export interface VersionsView {
   /** True when asked with attachments=1 of a server that keeps attachments; absent from an older server. */
   attachments?: boolean;
 }
-export interface VersionEntry { path: string; version: string; kind?: "note" | "image" | "pdf" | "folder"; }
+/** `kind` may also be one the plugin doesn't know ("file" from 0.6.0 on): such entries are left alone. `size`: an attachment's bytes, from 0.6.0 on. */
+export interface VersionEntry { path: string; version: string; kind?: "note" | "image" | "pdf" | "folder"; size?: number; }
 
 /** GET/PUT /api/notes/{vault}/{path}. */
 export interface NoteView {

@@ -50,6 +50,7 @@ export class KumbuApi implements RemoteApi {
     this.attachments = view.attachments === true;
     const entries: RemoteEntry[] = view.notes.map((n) => ({
       path: fromApiPath(this.vault, n.path), version: n.version, ...(n.kind === undefined ? {} : { kind: n.kind }),
+      ...(typeof n.size === "number" ? { size: n.size } : {}),
     }));
     if (!view.full) for (const p of view.deleted ?? []) entries.push({ path: fromApiPath(this.vault, p), version: null });
     return {

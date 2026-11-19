@@ -117,6 +117,14 @@ describe("server detection", () => {
     expect(last(http).url).toBe("https://k.example/api/vaults/Work/versions?attachments=1");
   });
 
+  test("versions passes each attachment's size on, and only a number", async () => {
+    const http = fakeHttp({ status: 200, body: { full: true, cursor: "c", state: "s", damaged: 0, attachments: true, deleted: [],
+      notes: [{ path: "/Work/a.md", version: "aaaaaaaaaaaa", kind: "note" }, { path: "/Work/b.pdf", version: "bbbbbbbbbbbb", kind: "pdf", size: 20_000_000 },
+        { path: "/Work/c.png", version: "cccccccccccc", kind: "image", size: "big" }] } });
+    const { entries } = await api(http).versions(null, null);
+    expect(entries.map((e) => e.size)).toEqual([undefined, 20_000_000, undefined]);
+  });
+
   test("an empty vault on a server with attachments still detects them", async () => {
     const http = fakeHttp({ status: 200, body: { full: true, cursor: "c", state: "s", damaged: 0, attachments: true, notes: [], deleted: [] } });
     expect(await api(http).versions(null, null)).toMatchObject({ attachments: true, entries: [] });
