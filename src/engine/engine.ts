@@ -6,7 +6,7 @@ import { makePlan, type Choice, type FirstSyncSummary, type MergePlan } from "./
 import { attachmentKind, conflictCopyPath, eligibility, isMarker, MARKER } from "./paths";
 import {
   AuthError, OfflineError, RejectedError,
-  type Clock, type FileStat, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi,
+  type Clock, type FetchPolicy, type FileStat, type MoveResult, type VersionsAnswer, type ConnectionMode, type LocalFiles, type NotSynced, type RemoteApi,
   type StateStore, type SyncState, type SyncStatus, type Version,
 } from "./ports";
 import { SerialQueue } from "./queue";
@@ -21,6 +21,8 @@ export interface EngineOptions {
   onFirstSyncDone?(summary: FirstSyncSummary): void;
   /** The user closed the first sync's question without an answer: nothing was saved. */
   onFirstSyncCancelled?(): void;
+  /** Without one, every attachment under the limit is downloaded. */
+  fetchPolicy?: FetchPolicy;
 }
 
 /** 15 MB per PDF or image, as the server takes them; notes keep their 1 MiB (MAX_BYTES). */
@@ -548,7 +550,7 @@ export class SyncEngine {
     for (const key of keys) {
       // A marker is never shown, nor asked about (both sides' is the same): the normal decision below syncs it.
       if (this.state.bases[key] !== undefined || isMarker(key)) continue;
-      if (this.tooLargeInKumbu(key, remote.get(key) ?? null)) continue;
+      if (this.leftInKumbu(key, remote.get(key) ?? null)) continue;
       const local = await this.localVersion(key, this.localPathOf.get(key) ?? key);
       // Stays as it is whatever the choice, so it is no part of the question: syncPath lists it.
       if (local === TOO_LARGE) {
@@ -673,7 +675,7 @@ export class SyncEngine {
       this.dirty.delete(key);
       return;
     }
-    if (this.tooLargeInKumbu(key, remote)) {
+    if (this.leftInKumbu(key, remote)) {
       this.dirty.delete(key);
       return;
     }
@@ -753,16 +755,18 @@ export class SyncEngine {
   /**
    * An attachment over its limit in Kumbu² is never downloaded (requestUrl holds a whole answer in memory, and a 0.6.0
    * server keeps files up to 1 GiB), and the local file of that name is neither replaced nor sent over it: both stay
-   * as they are, listed, until it is smaller there or gone. Known only from a server that lists sizes.
+   * as they are, listed, until it is smaller there or gone. Known only from a server that lists sizes. One the fetch
+   * policy declines stays in Kumbu² the same way, unlisted: the host chose it.
    */
-  private tooLargeInKumbu(key: string, remote: Version | null): boolean {
-    const size = remote === null || attachmentKind(key) === null ? undefined : this.remoteSizes.get(key);
-    if (size === undefined || size <= MAX_ATTACHMENT_BYTES) {
-      this.tooLargeThere.delete(key);
-      return false;
+  private leftInKumbu(key: string, remote: Version | null): boolean {
+    const kind = remote === null ? null : attachmentKind(key);
+    const size = kind === null ? undefined : this.remoteSizes.get(key);
+    if (size !== undefined && size > MAX_ATTACHMENT_BYTES) {
+      this.tooLargeThere.add(key);
+      return true;
     }
-    this.tooLargeThere.add(key);
-    return true;
+    this.tooLargeThere.delete(key);
+    return kind !== null && this.o.fetchPolicy?.wantBytes(key, size ?? null) === false;
   }
 
   /** Kumbu² is at the base, and the attachment's stat is what it was when its bytes were last found at the base. */

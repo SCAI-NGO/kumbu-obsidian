@@ -35,7 +35,8 @@ export class OfflineError extends Error {
   constructor(message: string, readonly retryAfterMs: number | null = null) { super(message); }
 }
 
-export interface ListedVault { name: string; canWrite: boolean; shared?: boolean; level?: string; }
+/** `id`: stays when the vault is renamed, unlike its name, which is also per member (an alias). */
+export interface ListedVault { id?: string; name: string; canWrite: boolean; shared?: boolean; level?: string; discreet?: boolean; }
 
 export interface RemoteApi {
   versions(since: string | null, state: string | null): Promise<VersionsAnswer>;
@@ -112,6 +113,13 @@ export interface SyncState {
   pendingChoice?: "both" | "local" | "kumbu" | null;
 }
 export interface StateStore { load(): Promise<SyncState>; save(state: SyncState): Promise<void>; }
+/**
+ * Which attachments' bytes this device keeps (offline mode design §6), asked for each PDF or image Kumbu² lists under
+ * the limit. No leaves it as one too large there: nothing is downloaded, and a file of that name here is neither
+ * replaced, sent nor trashed until the answer is yes; a deletion in Kumbu² still trashes it. A host that changes an
+ * answer to yes asks for a check. `size`: null from a server before 0.6.0, which lists no sizes.
+ */
+export interface FetchPolicy { wantBytes(path: string, size: number | null): boolean; }
 export interface Clock { now(): number; setTimeout(fn: () => void, ms: number): unknown; clearTimeout(handle: unknown): void; }
 
 /**

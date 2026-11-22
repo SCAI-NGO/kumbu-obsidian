@@ -37,6 +37,8 @@ export async function harness(o: {
   remoteFiles?: Record<string, Uint8Array>;
   /** A server from before attachments. */
   oldServer?: boolean;
+  /** The host's fetch policy (FetchPolicy.wantBytes); none fetches every attachment under the limit. */
+  wantBytes?: (path: string, size: number | null) => boolean;
 } = {}): Promise<Harness> {
   vi.useFakeTimers({ now: new Date(2026, 9, 27, 10, 15), toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   const server = new FakeServer(() => Date.now());
@@ -61,6 +63,7 @@ export async function harness(o: {
     onAuthLost: () => { h.authLost++; },
     onFirstSyncDone: (summary) => h.firstSyncsDone.push(summary),
     onFirstSyncCancelled: () => { h.cancelled++; },
+    ...(o.wantBytes === undefined ? {} : { fetchPolicy: { wantBytes: o.wantBytes } }),
   });
   if (o.start !== false) await h.engine.start();
   server.calls.length = 0;

@@ -26,7 +26,8 @@ export class KumbuApi implements RemoteApi {
   /** What the last versions answer said, for a 304, which says nothing; null until one has come. */
   private attachments: boolean | null = null;
 
-  constructor(private readonly http: HttpFn, server: string, private readonly vault: string, private readonly key: string) {
+  /** `key`: a device's API key; null for a browser session, whose cookie the host's HTTP function sends. */
+  constructor(private readonly http: HttpFn, server: string, private readonly vault: string, private readonly key: string | null) {
     this.server = trimServer(server);
   }
 
@@ -172,7 +173,10 @@ export class KumbuApi implements RemoteApi {
   async vaults(): Promise<ListedVault[]> {
     const r = await this.send("GET", "/api/vaults");
     expectOk(r);
-    return parse<VaultView[]>(r).map((v) => ({ name: v.name, canWrite: v.canWrite === true, shared: v.shared, level: v.level }));
+    return parse<VaultView[]>(r).map((v) => ({
+      name: v.name, canWrite: v.canWrite === true, shared: v.shared, level: v.level,
+      ...(v.id === undefined ? {} : { id: v.id }), ...(v.discreet === undefined ? {} : { discreet: v.discreet }),
+    }));
   }
 
   /** The current note of a 409: from its body, or read when the body has none. */
@@ -192,14 +196,18 @@ export class KumbuApi implements RemoteApi {
   }
 
   private send(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<HttpResponse> {
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.key}`, ...extra };
+    const headers: Record<string, string> = { ...this.authorization(), ...extra };
     return call(this.http, { method, url: this.server + path, headers }, body);
   }
 
   /** The body as it is: the server reads the format from the bytes and ignores the Content-Type. */
   private sendBytes(method: string, path: string, bytes: ArrayBuffer): Promise<HttpResponse> {
-    const headers = { Authorization: `Bearer ${this.key}`, "Content-Type": "application/octet-stream" };
+    const headers = { ...this.authorization(), "Content-Type": "application/octet-stream" };
     return call(this.http, { method, url: this.server + path, headers, body: bytes });
+  }
+
+  private authorization(): Record<string, string> {
+    return this.key === null ? {} : { Authorization: `Bearer ${this.key}` };
   }
 }
 

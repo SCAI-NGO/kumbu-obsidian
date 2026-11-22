@@ -24,7 +24,8 @@ export async function versionOf(text: string): Promise<Version> {
 
 /** An attachment's token: of its raw bytes, a CR included (VersionToken.Of over bytes, no newline normalisation). */
 export async function versionOfBytes(bytes: ArrayBuffer | Uint8Array): Promise<Version> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  // A view is copied onto a buffer of its own: WebCrypto's types take no view that could be of a SharedArrayBuffer.
+  const digest = await crypto.subtle.digest("SHA-256", bytes instanceof Uint8Array ? new Uint8Array(bytes) : bytes);
   return toHex(new Uint8Array(digest)).slice(0, 12);
 }
 

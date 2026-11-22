@@ -16,7 +16,7 @@ export default defineConfig([
     languageOptions: {
       parserOptions: {
         projectService: {
-          allowDefaultProject: ["eslint.config.*", "esbuild.config.mjs"],
+          allowDefaultProject: ["eslint.config.*", "esbuild.config.mjs", "scripts/*.mjs"],
         },
       },
     },
@@ -45,9 +45,9 @@ export default defineConfig([
   },
   {
     // Build tooling runs in Node, never in Obsidian.
-    files: ["esbuild.config.mjs", "vitest.config.ts"],
-    languageOptions: { globals: { process: "readonly" } },
-    rules: { "obsidianmd/no-nodejs-modules": "off" },
+    files: ["esbuild.config.mjs", "vitest.config.ts", "scripts/**"],
+    languageOptions: { globals: { process: "readonly", console: "readonly" } },
+    rules: { "obsidianmd/no-nodejs-modules": "off", "obsidianmd/rule-custom-message": "off", "no-restricted-globals": "off" },
   },
   {
     // Tests name ".obsidian" on purpose: it is the default config folder the paths must skip.

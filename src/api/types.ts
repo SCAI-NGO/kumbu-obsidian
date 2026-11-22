@@ -61,8 +61,8 @@ export interface MovedView { message: string; path: string | null; version: stri
 /** POST /api/ws-ticket. */
 export interface WsTicketView { ticket: string; expiresAt: string; }
 
-/** GET /api/vaults. */
-export interface VaultView { name: string; notes: number; embeddings: string; pending: boolean; canWrite?: boolean; shared?: boolean; level?: string; }
+/** GET /api/vaults. `id` and `discreet` from 0.6.0 on; a vault's id stays when it is renamed. */
+export interface VaultView { id?: string; discreet?: boolean; name: string; notes: number; embeddings: string; pending: boolean; canWrite?: boolean; shared?: boolean; level?: string; }
 
 /** POST /api/pairing/redeem (anonymous). */
 export interface RedeemRequest { code: string; device: string; plugin: string; }

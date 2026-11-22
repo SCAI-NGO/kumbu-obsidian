@@ -67,6 +67,8 @@ To try it in Obsidian, link the repository into a test vault: `ln -s "$PWD" <vau
 
 The sync engine (`src/engine/`), the API client (`src/api/`) and the live hints (`src/live/`) are plain TypeScript without Obsidian. Lint enforces that, and the tests and `pnpm e2e` run them in Node. Only `src/obsidian/` and `src/main.ts` use Obsidian's API.
 
+Those three folders and the test fakes `test/fakes/{fakeFiles,fakeServer,harness}.ts` are a copy of Kumbu²'s Eidolon core (`packages/eidolon-core` in [kumbukumbu](https://github.com/SCAI-NGO/kumbukumbu)), where the web app uses the same engine for its offline mode, and where their tests are. Don't change them here: change them there, put the new commit into `eidolon-core.json` and run `pnpm vendor` (or `pnpm vendor <path to a kumbukumbu checkout>`). CI runs `pnpm vendor --check`, which fails if the copy differs from that commit.
+
 **Releasing:** bump the version in `manifest.json`, `package.json` and `versions.json` (the new version → its `minAppVersion`), commit, and push a tag `x.y.z` without a `v`. The release workflow checks that the tag matches `manifest.json`, runs lint, the tests and the build, and creates the GitHub release with `main.js`, `manifest.json` and `styles.css`. Obsidian and BRAT install from that release.
 
 ## Licence
